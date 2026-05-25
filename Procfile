@@ -1,1 +1,1 @@
-worker: python upi_bot.py
+web: python upi_bot.py

@@ -4,19 +4,21 @@ import re
 import time
 import logging
 from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
-CHAT_ID   = os.environ["CHAT_ID"].strip()
-DATA_FILE = "transactions.json"
-LIMIT     = 100_000
-WINDOW    = 24 * 3600  # seconds
+BOT_TOKEN   = os.environ["BOT_TOKEN"].strip()
+CHAT_ID     = os.environ["CHAT_ID"].strip()
+WEBHOOK_URL = os.environ["WEBHOOK_URL"].strip()  # e.g. https://yourapp.railway.app
+PORT        = int(os.environ.get("PORT", 8080))
+DATA_FILE   = "transactions.json"
+LIMIT       = 100_000
+WINDOW      = 24 * 3600
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
-
-log.info(f"Config loaded. CHAT_ID={CHAT_ID!r}")
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 def load_txns():
@@ -94,29 +96,22 @@ def status_bar(used, limit=LIMIT):
 def build_status_message(txns, trigger_account=None, trigger_amount=None):
     u353,  a353,  r353,  o353  = calc(txns, "0353")
     u3826, a3826, r3826, o3826 = calc(txns, "3826")
-
     lines = []
-
     if trigger_account and trigger_amount:
         lines.append(f"💳 *{fmt_inr(trigger_amount)} debited · ••{trigger_account}*\n")
-
     lines.append("*••0353*")
     lines.append(status_bar(u353))
     lines.append(f"Used:      {fmt_inr(u353)}")
     lines.append(f"Available: {fmt_inr(a353)}")
     lines.append(f"Next release: {fmt_time(r353) + '  (' + fmt_inr(o353) + ' frees up)' if u353 > 0 and r353 > 0 else '—'}")
-
     lines.append("")
-
     lines.append("*••3826*")
     lines.append(status_bar(u3826))
     lines.append(f"Used:      {fmt_inr(u3826)}")
     lines.append(f"Available: {fmt_inr(a3826)}")
     lines.append(f"Next release: {fmt_time(r3826) + '  (' + fmt_inr(o3826) + ' frees up)' if u3826 > 0 and r3826 > 0 else '—'}")
-
     ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
     lines.append(f"\n_Updated {ts}_")
-
     return "\n".join(lines)
 
 # ── Telegram API ──────────────────────────────────────────────────────────────
@@ -128,77 +123,96 @@ def send(text, parse_mode="Markdown"):
         "text":       text,
         "parse_mode": parse_mode
     })
-    log.info(f"send() status={r.status_code} response={r.text[:120]}")
+    log.info(f"send() status={r.status_code} ok={r.json().get('ok')}")
 
-def get_updates(offset=None):
-    params = {"timeout": 30, "allowed_updates": ["message"]}
-    if offset:
-        params["offset"] = offset
-    r = requests.get(f"{BASE}/getUpdates", params=params, timeout=35)
-    return r.json().get("result", [])
+def set_webhook():
+    url = f"{WEBHOOK_URL}/webhook"
+    r = requests.post(f"{BASE}/setWebhook", json={"url": url})
+    log.info(f"setWebhook → {url} response={r.json()}")
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
-def main():
-    log.info("Bot starting…")
-    send("🤖 UPI Tracker bot is online. Send /status anytime.")
-    offset = None
+# ── Message handler ───────────────────────────────────────────────────────────
+def handle_message(text, sender):
+    log.info(f"handle_message: sender={sender!r} text={text[:80]!r}")
 
-    while True:
+    if sender != CHAT_ID:
+        log.warning(f"Ignored sender {sender!r}")
+        return
+
+    if text == "/status":
+        txns = prune(load_txns())
+        save_txns(txns)
+        send(build_status_message(txns))
+
+    elif text.startswith("/reset"):
+        parts = text.split()
+        txns  = prune(load_txns())
+        if len(parts) > 1 and parts[1] in ("353", "0353"):
+            txns = [t for t in txns if t["account"] != "0353"]
+            save_txns(txns)
+            send("✅ Cleared ••0353")
+        elif len(parts) > 1 and parts[1] == "3826":
+            txns = [t for t in txns if t["account"] != "3826"]
+            save_txns(txns)
+            send("✅ Cleared ••3826")
+        elif len(parts) > 1 and parts[1] == "all":
+            save_txns([])
+            send("✅ All cleared")
+        else:
+            send("Usage: /reset 353 · /reset 3826 · /reset all")
+
+    elif "Sent Rs." in text and "Kotak Bank AC X" in text:
+        txn = parse_sms(text)
+        if txn:
+            txns = prune(load_txns())
+            txns.append(txn)
+            save_txns(txns)
+            log.info(f"Parsed txn: {txn}")
+            send(build_status_message(txns, txn["account"], txn["amount"]))
+        else:
+            log.warning("Parse failed")
+            send("⚠️ Couldn't parse SMS.")
+    else:
+        log.info(f"No handler matched for: {text[:80]!r}")
+
+# ── HTTP server ───────────────────────────────────────────────────────────────
+class WebhookHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # suppress default HTTP logs
+
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"UPI Tracker bot is running.")
+
+    def do_POST(self):
+        if self.path != "/webhook":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        body   = self.rfile.read(length)
+
         try:
-            updates = get_updates(offset)
-            for update in updates:
-                offset = update["update_id"] + 1
-                msg    = update.get("message", {})
-                text   = msg.get("text", "").strip()
-                sender = str(msg.get("chat", {}).get("id", ""))
-
-                log.info(f"Received: sender={sender!r} CHAT_ID={CHAT_ID!r} match={sender==CHAT_ID} text={text[:80]!r}")
-
-                if sender != CHAT_ID:
-                    log.warning(f"Ignored — sender {sender!r} != CHAT_ID {CHAT_ID!r}")
-                    continue
-
-                if text == "/status":
-                    txns = prune(load_txns())
-                    save_txns(txns)
-                    send(build_status_message(txns))
-
-                elif text.startswith("/reset"):
-                    parts = text.split()
-                    txns  = prune(load_txns())
-                    if len(parts) > 1 and parts[1] in ("353", "0353"):
-                        txns = [t for t in txns if t["account"] != "0353"]
-                        save_txns(txns)
-                        send("✅ Transactions cleared for ••0353")
-                    elif len(parts) > 1 and parts[1] == "3826":
-                        txns = [t for t in txns if t["account"] != "3826"]
-                        save_txns(txns)
-                        send("✅ Transactions cleared for ••3826")
-                    elif len(parts) > 1 and parts[1] == "all":
-                        save_txns([])
-                        send("✅ All transactions cleared")
-                    else:
-                        send("Usage: /reset 353 · /reset 3826 · /reset all")
-
-                elif "Sent Rs." in text and "Kotak Bank AC X" in text:
-                    txn = parse_sms(text)
-                    if txn:
-                        txns = prune(load_txns())
-                        txns.append(txn)
-                        save_txns(txns)
-                        log.info(f"Parsed txn: {txn}")
-                        send(build_status_message(txns, txn["account"], txn["amount"]))
-                    else:
-                        log.warning(f"Parse failed for text: {text[:100]!r}")
-                        send("⚠️ Couldn't parse that SMS. Format unexpected.")
-
-                else:
-                    log.info(f"No matching handler for text: {text[:80]!r}")
-                    send(f"🤖 Received but not recognised:\n`{text[:200]}`", parse_mode="Markdown")
-
+            update = json.loads(body)
+            log.info(f"Webhook update received")
+            msg    = update.get("message", {})
+            text   = msg.get("text", "").strip()
+            sender = str(msg.get("chat", {}).get("id", ""))
+            if text:
+                threading.Thread(target=handle_message, args=(text, sender)).start()
         except Exception as e:
-            log.error(f"Error in main loop: {e}", exc_info=True)
-            time.sleep(5)
+            log.error(f"Webhook parse error: {e}")
 
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    log.info(f"Starting webhook server on port {PORT}")
+    set_webhook()
+    send("🤖 UPI Tracker bot is online (webhook mode).")
+    server = HTTPServer(("0.0.0.0", PORT), WebhookHandler)
+    log.info("Listening...")
+    server.serve_forever()
