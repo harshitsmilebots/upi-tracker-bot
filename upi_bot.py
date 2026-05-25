@@ -229,3 +229,18 @@ threading.Thread(target=self_ping, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
+@app.route("/backfill", methods=["POST"])
+def backfill():
+    """Accept a full transactions array and overwrite the database."""
+    data = request.get_json(silent=True) or {}
+    txns = data.get("transactions", [])
+    if not txns:
+        return {"ok": False, "error": "no transactions"}, 400
+    with lock:
+        save_txns(txns)
+    log.info(f"Backfilled {len(txns)} transactions")
+    # Send status after backfill
+    pruned = prune(txns)
+    send(build_status_message(pruned))
+    return {"ok": True, "count": len(txns)}, 200
