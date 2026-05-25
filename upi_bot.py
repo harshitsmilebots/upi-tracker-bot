@@ -4,27 +4,27 @@ import re
 import time
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request
 import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BOT_TOKEN   = os.environ["BOT_TOKEN"].strip()
-CHAT_ID     = os.environ["CHAT_ID"].strip()
-WEBHOOK_URL = os.environ["WEBHOOK_URL"].strip()
-PORT        = int(os.environ.get("PORT", 8080))
-DATA_FILE   = "transactions.json"
-LIMIT       = 100_000
-WINDOW      = 24 * 3600
+BOT_TOKEN        = os.environ["BOT_TOKEN"].strip()
+CHAT_ID          = os.environ["CHAT_ID"].strip()
+WEBHOOK_URL      = os.environ["WEBHOOK_URL"].strip()
+PORT             = int(os.environ.get("PORT", 8080))
+DATA_FILE        = "transactions.json"
+LIMIT            = 100_000
+WINDOW           = 24 * 3600
+TRACKED_ACCOUNTS = {"0353", "3826"}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# ── Persistence ───────────────────────────────────────────────────────────────
 lock = threading.Lock()
 
+# ── Persistence ───────────────────────────────────────────────────────────────
 def load_txns():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE) as f:
@@ -58,12 +58,12 @@ def calc(txns, account):
     avail    = max(0, LIMIT - used)
     if relevant:
         oldest_ts  = min(t["ts"] for t in relevant)
-        release_in = max(0, (oldest_ts + WINDOW) - time.time())
+        release_at = oldest_ts + WINDOW
         oldest_amt = next(t["amount"] for t in relevant if t["ts"] == oldest_ts)
     else:
-        release_in = 0
+        release_at = None
         oldest_amt = 0
-    return used, avail, release_in, oldest_amt
+    return used, avail, release_at, oldest_amt
 
 def fmt_inr(n):
     s = str(int(n))
@@ -76,17 +76,16 @@ def fmt_inr(n):
         s = s[:-2]
     return "₹" + result
 
-def fmt_time(seconds):
-    if seconds <= 0:
-        return "now"
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    if h == 0:
-        return f"{m}m"
-    return f"{h}h {m}m"
+def fmt_release(release_at):
+    """Returns date+time string in IST."""
+    if not release_at:
+        return "—"
+    # IST = UTC+5:30
+    ist = datetime.fromtimestamp(release_at, tz=timezone(timedelta(hours=5, minutes=30)))
+    return ist.strftime("%-d %b, %-I:%M %p")
 
-def status_bar(used, limit=LIMIT):
-    pct    = min(used / limit, 1.0)
+def status_bar(used):
+    pct    = min(used / LIMIT, 1.0)
     filled = int(pct * 10)
     bar    = "█" * filled + "░" * (10 - filled)
     emoji  = "🔴" if pct >= 0.95 else "🟡" if pct >= 0.70 else "🟢"
@@ -95,22 +94,35 @@ def status_bar(used, limit=LIMIT):
 def build_status_message(txns, trigger_account=None, trigger_amount=None):
     u353,  a353,  r353,  o353  = calc(txns, "0353")
     u3826, a3826, r3826, o3826 = calc(txns, "3826")
+
     lines = []
+
+    # ── Header — visible in lock screen preview ───────────────────────────────
     if trigger_account and trigger_amount:
-        lines.append(f"💳 *{fmt_inr(trigger_amount)} debited · ••{trigger_account}*\n")
-    lines.append("*••0353*")
-    lines.append(status_bar(u353))
-    lines.append(f"Used:      {fmt_inr(u353)}")
-    lines.append(f"Available: {fmt_inr(a353)}")
-    lines.append(f"Next release: {fmt_time(r353) + '  (' + fmt_inr(o353) + ' frees up)' if u353 > 0 and r353 > 0 else '—'}")
+        lines.append(f"💳 {fmt_inr(trigger_amount)} debited · ••{trigger_account}")
+    lines.append(f"••0353: {fmt_inr(a353)} free")
+    lines.append(f"••3826: {fmt_inr(a3826)} free")
+
+    # ── Detail ────────────────────────────────────────────────────────────────
     lines.append("")
-    lines.append("*••3826*")
-    lines.append(status_bar(u3826))
-    lines.append(f"Used:      {fmt_inr(u3826)}")
-    lines.append(f"Available: {fmt_inr(a3826)}")
-    lines.append(f"Next release: {fmt_time(r3826) + '  (' + fmt_inr(o3826) + ' frees up)' if u3826 > 0 and r3826 > 0 else '—'}")
-    ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    lines.append(f"\n_Updated {ts}_")
+    lines.append(f"*••0353*  {status_bar(u353)}")
+    lines.append(f"Used: {fmt_inr(u353)}  Available: {fmt_inr(a353)}")
+    if u353 > 0 and r353:
+        lines.append(f"Releases: {fmt_release(r353)}  ({fmt_inr(o353)} frees up)")
+    else:
+        lines.append("Releases: —")
+
+    lines.append("")
+    lines.append(f"*••3826*  {status_bar(u3826)}")
+    lines.append(f"Used: {fmt_inr(u3826)}  Available: {fmt_inr(a3826)}")
+    if u3826 > 0 and r3826:
+        lines.append(f"Releases: {fmt_release(r3826)}  ({fmt_inr(o3826)} frees up)")
+    else:
+        lines.append("Releases: —")
+
+    ts = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%-d %b, %-I:%M %p IST")
+    lines.append(f"\n_{ts}_")
+
     return "\n".join(lines)
 
 # ── Telegram API ──────────────────────────────────────────────────────────────
@@ -133,16 +145,19 @@ def set_webhook():
 def process_sms(text):
     log.info(f"process_sms: {text[:80]!r}")
     txn = parse_sms(text)
-    if txn:
-        with lock:
-            txns = prune(load_txns())
-            txns.append(txn)
-            save_txns(txns)
-        log.info(f"Parsed txn: {txn}")
-        send(build_status_message(txns, txn["account"], txn["amount"]))
-        return True
-    log.warning(f"Parse failed for: {text[:80]!r}")
-    return False
+    if not txn:
+        log.warning("Parse failed")
+        return False
+    if txn["account"] not in TRACKED_ACCOUNTS:
+        log.info(f"Ignoring untracked account: {txn['account']}")
+        return False
+    with lock:
+        txns = prune(load_txns())
+        txns.append(txn)
+        save_txns(txns)
+    log.info(f"Saved txn: {txn}")
+    send(build_status_message(txns, txn["account"], txn["amount"]))
+    return True
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.route("/", methods=["GET"])
@@ -155,7 +170,6 @@ def ping():
 
 @app.route("/sms", methods=["POST"])
 def sms_endpoint():
-    """Called directly by iPhone Shortcut with raw SMS text."""
     data = request.get_json(silent=True) or {}
     text = data.get("text", "").strip()
     log.info(f"/sms received: {text[:80]!r}")
@@ -166,7 +180,6 @@ def sms_endpoint():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Called by Telegram for manual bot messages like /status and /reset."""
     update = request.get_json(silent=True)
     if update:
         msg    = update.get("message", {})
