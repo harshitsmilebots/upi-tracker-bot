@@ -199,3 +199,11 @@ if __name__ == "__main__":
     set_webhook()
     send("🤖 UPI Tracker bot is online (webhook mode).")
     app.run(host="0.0.0.0", port=PORT)
+
+# ── Gunicorn startup (called when module loads) ───────────────────────────────
+def startup():
+    log.info(f"Starting on port {PORT}")
+    set_webhook()
+    send("🤖 UPI Tracker bot is online (webhook mode).")
+
+startup()
