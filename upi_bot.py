@@ -3,10 +3,10 @@ import json
 import re
 import time
 import logging
+import threading
 from datetime import datetime, timezone
 from flask import Flask, request
 import requests
-import threading
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BOT_TOKEN   = os.environ["BOT_TOKEN"].strip()
@@ -129,81 +129,90 @@ def set_webhook():
     r = requests.post(f"{BASE}/setWebhook", json={"url": url})
     log.info(f"setWebhook → {url} response={r.json()}")
 
-# ── Message handler ───────────────────────────────────────────────────────────
-def handle_message(text, sender):
-    log.info(f"handle_message: sender={sender!r} text={text[:80]!r}")
-
-    if sender != CHAT_ID:
-        log.warning(f"Ignored sender {sender!r}")
-        return
-
-    if text == "/status":
+# ── Core SMS processing ───────────────────────────────────────────────────────
+def process_sms(text):
+    log.info(f"process_sms: {text[:80]!r}")
+    txn = parse_sms(text)
+    if txn:
         with lock:
             txns = prune(load_txns())
+            txns.append(txn)
             save_txns(txns)
-        send(build_status_message(txns))
-
-    elif text.startswith("/reset"):
-        parts = text.split()
-        with lock:
-            txns = prune(load_txns())
-            if len(parts) > 1 and parts[1] in ("353", "0353"):
-                txns = [t for t in txns if t["account"] != "0353"]
-                save_txns(txns)
-                send("✅ Cleared ••0353")
-            elif len(parts) > 1 and parts[1] == "3826":
-                txns = [t for t in txns if t["account"] != "3826"]
-                save_txns(txns)
-                send("✅ Cleared ••3826")
-            elif len(parts) > 1 and parts[1] == "all":
-                save_txns([])
-                send("✅ All cleared")
-            else:
-                send("Usage: /reset 353 · /reset 3826 · /reset all")
-
-    elif "Sent Rs." in text and "Kotak Bank AC X" in text:
-        txn = parse_sms(text)
-        if txn:
-            with lock:
-                txns = prune(load_txns())
-                txns.append(txn)
-                save_txns(txns)
-            log.info(f"Parsed txn: {txn}")
-            send(build_status_message(txns, txn["account"], txn["amount"]))
-        else:
-            log.warning("Parse failed")
-            send("⚠️ Couldn't parse SMS.")
-    else:
-        log.info(f"No handler: {text[:80]!r}")
+        log.info(f"Parsed txn: {txn}")
+        send(build_status_message(txns, txn["account"], txn["amount"]))
+        return True
+    log.warning(f"Parse failed for: {text[:80]!r}")
+    return False
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.route("/", methods=["GET"])
 def health():
-    return "UPI Tracker bot is running.", 200
+    return "UPI Tracker running.", 200
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return "pong", 200
+
+@app.route("/sms", methods=["POST"])
+def sms_endpoint():
+    """Called directly by iPhone Shortcut with raw SMS text."""
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "").strip()
+    log.info(f"/sms received: {text[:80]!r}")
+    if not text:
+        return {"ok": False, "error": "no text"}, 400
+    ok = process_sms(text)
+    return {"ok": ok}, 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    """Called by Telegram for manual bot messages like /status and /reset."""
     update = request.get_json(silent=True)
     if update:
-        log.info(f"Webhook update received")
         msg    = update.get("message", {})
         text   = msg.get("text", "").strip()
         sender = str(msg.get("chat", {}).get("id", ""))
-        if text:
-            threading.Thread(target=handle_message, args=(text, sender)).start()
+        log.info(f"Webhook: sender={sender!r} text={text[:60]!r}")
+        if sender != CHAT_ID:
+            return "ok", 200
+        if text == "/status":
+            with lock:
+                txns = prune(load_txns())
+                save_txns(txns)
+            send(build_status_message(txns))
+        elif text.startswith("/reset"):
+            parts = text.split()
+            with lock:
+                txns = prune(load_txns())
+                if len(parts) > 1 and parts[1] in ("353", "0353"):
+                    txns = [t for t in txns if t["account"] != "0353"]
+                    save_txns(txns)
+                    send("✅ Cleared ••0353")
+                elif len(parts) > 1 and parts[1] == "3826":
+                    txns = [t for t in txns if t["account"] != "3826"]
+                    save_txns(txns)
+                    send("✅ Cleared ••3826")
+                elif len(parts) > 1 and parts[1] == "all":
+                    save_txns([])
+                    send("✅ All cleared")
+                else:
+                    send("Usage: /reset 353 · /reset 3826 · /reset all")
     return "ok", 200
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Self-ping to keep Railway alive ──────────────────────────────────────────
+def self_ping():
+    while True:
+        time.sleep(60)
+        try:
+            requests.get(f"{WEBHOOK_URL}/ping", timeout=10)
+            log.info("self-ping ok")
+        except Exception as e:
+            log.warning(f"self-ping failed: {e}")
+
+# ── Startup ───────────────────────────────────────────────────────────────────
+log.info(f"Starting on port {PORT}")
+set_webhook()
+threading.Thread(target=self_ping, daemon=True).start()
+
 if __name__ == "__main__":
-    log.info(f"Starting on port {PORT}")
-    set_webhook()
-    send("🤖 UPI Tracker bot is online (webhook mode).")
     app.run(host="0.0.0.0", port=PORT)
-
-# ── Gunicorn startup (called when module loads) ───────────────────────────────
-def startup():
-    log.info(f"Starting on port {PORT}")
-    set_webhook()
-    send("🤖 UPI Tracker bot is online (webhook mode).")
-
-startup()
