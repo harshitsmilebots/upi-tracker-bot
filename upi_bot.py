@@ -4,14 +4,14 @@ import re
 import time
 import logging
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
+from flask import Flask, request
 import requests
+import threading
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BOT_TOKEN   = os.environ["BOT_TOKEN"].strip()
 CHAT_ID     = os.environ["CHAT_ID"].strip()
-WEBHOOK_URL = os.environ["WEBHOOK_URL"].strip()  # e.g. https://yourapp.railway.app
+WEBHOOK_URL = os.environ["WEBHOOK_URL"].strip()
 PORT        = int(os.environ.get("PORT", 8080))
 DATA_FILE   = "transactions.json"
 LIMIT       = 100_000
@@ -20,7 +20,11 @@ WINDOW      = 24 * 3600
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
+app = Flask(__name__)
+
 # ── Persistence ───────────────────────────────────────────────────────────────
+lock = threading.Lock()
+
 def load_txns():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE) as f:
@@ -85,12 +89,7 @@ def status_bar(used, limit=LIMIT):
     pct    = min(used / limit, 1.0)
     filled = int(pct * 10)
     bar    = "█" * filled + "░" * (10 - filled)
-    if pct >= 0.95:
-        emoji = "🔴"
-    elif pct >= 0.70:
-        emoji = "🟡"
-    else:
-        emoji = "🟢"
+    emoji  = "🔴" if pct >= 0.95 else "🟡" if pct >= 0.70 else "🟢"
     return f"{emoji} [{bar}] {int(pct*100)}%"
 
 def build_status_message(txns, trigger_account=None, trigger_amount=None):
@@ -139,80 +138,64 @@ def handle_message(text, sender):
         return
 
     if text == "/status":
-        txns = prune(load_txns())
-        save_txns(txns)
+        with lock:
+            txns = prune(load_txns())
+            save_txns(txns)
         send(build_status_message(txns))
 
     elif text.startswith("/reset"):
         parts = text.split()
-        txns  = prune(load_txns())
-        if len(parts) > 1 and parts[1] in ("353", "0353"):
-            txns = [t for t in txns if t["account"] != "0353"]
-            save_txns(txns)
-            send("✅ Cleared ••0353")
-        elif len(parts) > 1 and parts[1] == "3826":
-            txns = [t for t in txns if t["account"] != "3826"]
-            save_txns(txns)
-            send("✅ Cleared ••3826")
-        elif len(parts) > 1 and parts[1] == "all":
-            save_txns([])
-            send("✅ All cleared")
-        else:
-            send("Usage: /reset 353 · /reset 3826 · /reset all")
+        with lock:
+            txns = prune(load_txns())
+            if len(parts) > 1 and parts[1] in ("353", "0353"):
+                txns = [t for t in txns if t["account"] != "0353"]
+                save_txns(txns)
+                send("✅ Cleared ••0353")
+            elif len(parts) > 1 and parts[1] == "3826":
+                txns = [t for t in txns if t["account"] != "3826"]
+                save_txns(txns)
+                send("✅ Cleared ••3826")
+            elif len(parts) > 1 and parts[1] == "all":
+                save_txns([])
+                send("✅ All cleared")
+            else:
+                send("Usage: /reset 353 · /reset 3826 · /reset all")
 
     elif "Sent Rs." in text and "Kotak Bank AC X" in text:
         txn = parse_sms(text)
         if txn:
-            txns = prune(load_txns())
-            txns.append(txn)
-            save_txns(txns)
+            with lock:
+                txns = prune(load_txns())
+                txns.append(txn)
+                save_txns(txns)
             log.info(f"Parsed txn: {txn}")
             send(build_status_message(txns, txn["account"], txn["amount"]))
         else:
             log.warning("Parse failed")
             send("⚠️ Couldn't parse SMS.")
     else:
-        log.info(f"No handler matched for: {text[:80]!r}")
+        log.info(f"No handler: {text[:80]!r}")
 
-# ── HTTP server ───────────────────────────────────────────────────────────────
-class WebhookHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        pass  # suppress default HTTP logs
+# ── Routes ────────────────────────────────────────────────────────────────────
+@app.route("/", methods=["GET"])
+def health():
+    return "UPI Tracker bot is running.", 200
 
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"UPI Tracker bot is running.")
-
-    def do_POST(self):
-        if self.path != "/webhook":
-            self.send_response(404)
-            self.end_headers()
-            return
-
-        length = int(self.headers.get("Content-Length", 0))
-        body   = self.rfile.read(length)
-
-        try:
-            update = json.loads(body)
-            log.info(f"Webhook update received")
-            msg    = update.get("message", {})
-            text   = msg.get("text", "").strip()
-            sender = str(msg.get("chat", {}).get("id", ""))
-            if text:
-                threading.Thread(target=handle_message, args=(text, sender)).start()
-        except Exception as e:
-            log.error(f"Webhook parse error: {e}")
-
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"ok")
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = request.get_json(silent=True)
+    if update:
+        log.info(f"Webhook update received")
+        msg    = update.get("message", {})
+        text   = msg.get("text", "").strip()
+        sender = str(msg.get("chat", {}).get("id", ""))
+        if text:
+            threading.Thread(target=handle_message, args=(text, sender)).start()
+    return "ok", 200
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    log.info(f"Starting webhook server on port {PORT}")
+    log.info(f"Starting on port {PORT}")
     set_webhook()
     send("🤖 UPI Tracker bot is online (webhook mode).")
-    server = HTTPServer(("0.0.0.0", PORT), WebhookHandler)
-    log.info("Listening...")
-    server.serve_forever()
+    app.run(host="0.0.0.0", port=PORT)
