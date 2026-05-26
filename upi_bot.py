@@ -41,6 +41,10 @@ def prune(txns):
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 def parse_sms(text):
+    # Must contain "UPI Ref" to exclude IMPS/NEFT messages
+    if "UPI Ref" not in text:
+        log.info("Skipping non-UPI message (no 'UPI Ref' found)")
+        return None
     amt_match  = re.search(r"Rs\.(\d+(?:\.\d+)?)", text)
     acct_match = re.search(r"AC X(\d+)", text)
     if amt_match and acct_match:
@@ -210,6 +214,31 @@ def webhook():
                     send("✅ All cleared")
                 else:
                     send("Usage: /reset 353 · /reset 3826 · /reset all")
+        elif text.startswith("/remove"):
+            # /remove AMOUNT ACCOUNT  e.g. /remove 200000 353
+            parts = text.split()
+            if len(parts) == 3:
+                try:
+                    amt     = int(parts[1])
+                    acct    = parts[2].lstrip("0") or "0"
+                    acct    = parts[2] if parts[2] in ("0353","3826") else ("0353" if parts[2] in ("353",) else "3826")
+                    with lock:
+                        txns = prune(load_txns())
+                        # Find most recent matching transaction
+                        matches = [t for t in txns if t["account"] == acct and t["amount"] == amt]
+                        if matches:
+                            latest = max(matches, key=lambda t: t["ts"])
+                            txns.remove(latest)
+                            save_txns(txns)
+                            send(f"✅ Removed ₹{amt:,} from ••{acct}\n" + build_status_message(txns))
+                        else:
+                            send(f"⚠️ No matching transaction found for ₹{amt:,} on ••{acct}")
+                except Exception as e:
+                    send(f"Usage: /remove AMOUNT ACCOUNT\nExample: /remove 200000 353")
+            else:
+                send("Usage: /remove AMOUNT ACCOUNT\nExample: /remove 200000 353")
+        elif "Sent Rs." in text and "Kotak Bank AC X" in text:
+            threading.Thread(target=process_sms, args=(text,)).start()
     return "ok", 200
 
 # ── Self-ping to keep Railway alive ──────────────────────────────────────────
