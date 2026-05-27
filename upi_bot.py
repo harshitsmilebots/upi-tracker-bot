@@ -160,7 +160,7 @@ def parse_sync_message(text):
             current_account = "3826"
 
         # Match transaction lines:  9:07 AM  ₹24,895  → frees 27 May, 9:07 AM
-        m = re.search(r"→ frees (\d+ \w+, \d+:\d+ [AP]M)", line)
+        m = re.search(r"→ (\d+ \w+, \d+:\d+ [AP]M)", line)
         amt_m = re.search(r"₹([\d,]+)", line)
         if m and amt_m and current_account:
             try:
@@ -308,7 +308,7 @@ def webhook():
         elif text == "/sync":
             send("Send me the last correct status message and I'll restore from it.")
 
-        elif "→ frees" in text and ("••0353" in text or "••3826" in text):
+        elif "→" in text and ("••0353" in text or "••3826" in text):
             # This is a previously sent status message being forwarded back for sync
             txns = parse_sync_message(text)
             if txns:
