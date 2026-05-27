@@ -120,9 +120,9 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
     if t353:
         for t in t353:
             rel = fmt_release(t["ts"] + WINDOW)
-            lines.append(f"  {fmt_ts(t['ts'])}  {fmt_inr(t['amount'])}  → frees {rel}")
+            lines.append(f"{fmt_inr(t['amount'])}  → {rel}")
     else:
-        lines.append("  No transactions")
+        lines.append("No transactions")
 
     lines.append("")
 
@@ -135,9 +135,9 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
     if t3826:
         for t in t3826:
             rel = fmt_release(t["ts"] + WINDOW)
-            lines.append(f"  {fmt_ts(t['ts'])}  {fmt_inr(t['amount'])}  → frees {rel}")
+            lines.append(f"{fmt_inr(t['amount'])}  → {rel}")
     else:
-        lines.append("  No transactions")
+        lines.append("No transactions")
 
     ts = datetime.now(IST).strftime("%-d %b, %-I:%M %p IST")
     lines.append(f"\n_{ts}_")
