@@ -114,7 +114,6 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
     # ••0353 detail
     lines.append(f"*••0353*  {status_bar(u353)}")
     lines.append(f"Used: {fmt_inr(u353)}  Available: {fmt_inr(a353)}")
-    lines.append(f"Releases: {fmt_release(r353)}")
     # Transactions
     t353 = sorted([t for t in txns if t["account"] == "0353"], key=lambda t: t["ts"])
     if t353:
@@ -129,7 +128,6 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
     # ••3826 detail
     lines.append(f"*••3826*  {status_bar(u3826)}")
     lines.append(f"Used: {fmt_inr(u3826)}  Available: {fmt_inr(a3826)}")
-    lines.append(f"Releases: {fmt_release(r3826)}")
     # Transactions
     t3826 = sorted([t for t in txns if t["account"] == "3826"], key=lambda t: t["ts"])
     if t3826:
