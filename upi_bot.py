@@ -16,7 +16,7 @@ PORT             = int(os.environ.get("PORT", 8080))
 DATA_FILE        = "transactions.json"
 LIMIT            = 100_000
 WINDOW           = 24 * 3600
-TRACKED_ACCOUNTS = {"0353", "3826"}
+TRACKED_ACCOUNTS = {"0353", "3826", "1183"}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -101,6 +101,7 @@ def status_bar(used):
 def build_status_message(txns, trigger_account=None, trigger_amount=None):
     u353,  a353,  r353,  o353  = calc(txns, "0353")
     u3826, a3826, r3826, o3826 = calc(txns, "3826")
+    u1183, a1183, r1183, o1183 = calc(txns, "1183")
 
     lines = []
 
@@ -109,6 +110,7 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
         lines.append(f"💳 {fmt_inr(trigger_amount)} debited · ••{trigger_account}")
     lines.append(f"••0353: {fmt_inr(a353)} free")
     lines.append(f"••3826: {fmt_inr(a3826)} free")
+    lines.append(f"••1183: {fmt_inr(a1183)} free")
     lines.append("")
 
     # ••0353 detail
@@ -134,6 +136,18 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
         for t in t3826:
             rel = fmt_release(t["ts"] + WINDOW)
             lines.append(f"{fmt_inr(t['amount'])}  → {rel}")
+    else:
+        lines.append("No transactions")
+
+    lines.append("")
+
+    # ••1183 detail
+    lines.append(f"*••1183*  {status_bar(u1183)}")
+    lines.append(f"Used: {fmt_inr(u1183)}  Available: {fmt_inr(a1183)}")
+    t1183 = sorted([t for t in txns if t["account"] == "1183"], key=lambda t: t["ts"])
+    if t1183:
+        for t in t1183:
+            lines.append(f"{fmt_inr(t['amount'])}  → {fmt_release(t['ts'] + WINDOW)}")
     else:
         lines.append("No transactions")
 
@@ -278,6 +292,10 @@ def webhook():
                     txns = [t for t in txns if t["account"] != "3826"]
                     save_txns(txns)
                     send("✅ Cleared ••3826")
+                elif len(parts) > 1 and parts[1] == "1183":
+                    txns = [t for t in txns if t["account"] != "1183"]
+                    save_txns(txns)
+                    send("✅ Cleared ••1183")
                 elif len(parts) > 1 and parts[1] == "all":
                     save_txns([])
                     send("✅ All cleared")
