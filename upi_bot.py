@@ -172,6 +172,8 @@ def parse_sync_message(text):
             current_account = "0353"
         elif "••3826" in line and "free" not in line:
             current_account = "3826"
+        elif "••1183" in line and "free" not in line:
+            current_account = "1183"
 
         # Match transaction lines:  9:07 AM  ₹24,895  → frees 27 May, 9:07 AM
         m = re.search(r"→ (\d+ \w+, \d+:\d+ [AP]M)", line)
