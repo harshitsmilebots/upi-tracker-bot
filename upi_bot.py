@@ -252,6 +252,7 @@ def sms_endpoint():
 
 @app.route("/backfill", methods=["POST"])
 def backfill():
+    """Overwrites entire database."""
     data = request.get_json(silent=True) or {}
     txns = data.get("transactions", [])
     if not txns:
@@ -262,6 +263,21 @@ def backfill():
     pruned = prune(txns)
     send(build_status_message(pruned))
     return {"ok": True, "count": len(txns)}, 200
+
+@app.route("/merge", methods=["POST"])
+def merge():
+    """Appends transactions to existing database without wiping."""
+    data = request.get_json(silent=True) or {}
+    new_txns = data.get("transactions", [])
+    if not new_txns:
+        return {"ok": False, "error": "no transactions"}, 400
+    with lock:
+        existing = prune(load_txns())
+        merged = existing + new_txns
+        save_txns(merged)
+    log.info(f"Merged {len(new_txns)} transactions, total now {len(merged)}")
+    send(build_status_message(prune(merged)))
+    return {"ok": True, "added": len(new_txns), "total": len(merged)}, 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
