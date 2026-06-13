@@ -151,8 +151,13 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
     else:
         lines.append("No transactions")
 
-    ts = datetime.now(IST).strftime("%-d %b, %-I:%M %p IST")
-    lines.append(f"\n_{ts}_")
+    now_str = datetime.now(IST).strftime("%-d %b, %-I:%M %p IST")
+    all_txns = [t for t in txns if t["account"] in TRACKED_ACCOUNTS]
+    if all_txns:
+        last_ts = max(t["ts"] for t in all_txns)
+        last_str = datetime.fromtimestamp(last_ts, tz=IST).strftime("%-d %b, %-I:%M %p IST")
+        lines.append(f"\n_Last txn: {last_str}_")
+    lines.append(f"_{now_str}_")
 
     return "\n".join(lines)
 
