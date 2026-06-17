@@ -247,6 +247,43 @@ def health():
 def ping():
     return "pong", 200
 
+@app.route("/data", methods=["GET"])
+def data():
+    """Returns live account data for the HTML dashboard."""
+    with lock:
+        txns = prune(load_txns())
+    
+    accounts = []
+    for acct in ["0353", "3826", "1183"]:
+        relevant = [t for t in txns if t["account"] == acct]
+        used     = sum(t["amount"] for t in relevant)
+        avail    = max(0, LIMIT - used)
+        pct      = round(min(used / LIMIT, 1.0) * 100)
+        txn_list = sorted(relevant, key=lambda t: t["ts"])
+        accounts.append({
+            "account":  acct,
+            "used":     used,
+            "available": avail,
+            "pct":      pct,
+            "transactions": [
+                {
+                    "amount":     t["amount"],
+                    "ts":         t["ts"],
+                    "releases_at": t["ts"] + WINDOW
+                }
+                for t in txn_list
+            ]
+        })
+    
+    last_ts = max((t["ts"] for t in txns), default=None)
+    
+    from flask import jsonify
+    return jsonify({
+        "accounts":    accounts,
+        "last_txn_ts": last_ts,
+        "server_ts":   time.time()
+    })
+
 @app.route("/sms", methods=["POST"])
 def sms_endpoint():
     data = request.get_json(silent=True) or {}
