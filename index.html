@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="UPI">
+<title>UPI Tracker</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;500;700&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0c0c0f;
+  --surface:  #141418;
+  --border:   #1f1f28;
+  --text:     #e8e8f0;
+  --muted:    #52526e;
+  --ok:       #22d07a;
+  --warn:     #f5a623;
+  --danger:   #f03e3e;
+  --accent:   #ff5100;
+  --mono:     'Space Mono', monospace;
+  --sans:     'DM Sans', sans-serif;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  min-height: 100dvh;
+  padding: env(safe-area-inset-top, 20px) 16px env(safe-area-inset-bottom, 24px);
+}
+
+/* subtle grid bg */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255,81,0,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,81,0,0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+  pointer-events: none;
+}
+
+.wrap { max-width: 420px; margin: 0 auto; position: relative; }
+
+/* ── Header ── */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 0 24px;
+}
+
+.logo {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+
+.refresh-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.refresh-btn:active { color: var(--accent); border-color: var(--accent); }
+
+/* ── Summary strip ── */
+.summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.summary-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  text-align: center;
+}
+
+.summary-card .acct {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.summary-card .free {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ── Account card ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 18px;
+  margin-bottom: 10px;
+  transition: border-color 0.3s;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.card-title {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.pct-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
+/* ── Progress bar ── */
+.bar-track {
+  height: 5px;
+  background: var(--border);
+  border-radius: 99px;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  transition: width 0.8s cubic-bezier(0.4,0,0.2,1);
+}
+
+/* ── Amounts row ── */
+.amounts {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.amt-block { }
+.amt-label {
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.amt-value {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+/* ── Transactions ── */
+.txn-label {
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.txn-list { display: flex; flex-direction: column; gap: 4px; }
+
+.txn-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg);
+  border-radius: 7px;
+  padding: 7px 10px;
+}
+
+.txn-amt {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.txn-release {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.txn-release.soon { color: var(--warn); }
+
+.no-txns {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 0;
+}
+
+/* ── Footer ── */
+.footer {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.footer-line {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.footer-line span { color: var(--text); }
+
+/* ── Loading / error ── */
+.state {
+  text-align: center;
+  padding: 60px 20px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  margin-right: 6px;
+  animation: blink 2s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spinning { animation: spin 1s linear infinite; display: inline-block; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo">UPI Limits</div>
+    <button class="refresh-btn" onclick="fetchData()">↻ REFRESH</button>
+  </header>
+
+  <div id="root"><div class="state">Loading...</div></div>
+
+  <div class="footer" id="footer" style="display:none">
+    <div class="footer-line" id="last-txn"></div>
+    <div class="footer-line" id="updated-at"></div>
+  </div>
+
+</div>
+
+<script>
+const API = 'https://worker-production-6eed.up.railway.app/data';
+const LIMIT = 100000;
+
+function fmtInr(n) {
+  const s = String(Math.round(n));
+  if (s.length <= 3) return '₹' + s;
+  let result = s.slice(-3);
+  let rest = s.slice(0, -3);
+  while (rest.length > 0) {
+    result = rest.slice(-2) + ',' + result;
+    rest = rest.slice(0, -2);
+  }
+  return '₹' + result;
+}
+
+function fmtDate(ts) {
+  const d = new Date(ts * 1000);
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const h = d.getHours();
+  const m = d.getMinutes().toString().padStart(2,'0');
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const hr = h % 12 || 12;
+  return `${d.getDate()} ${months[d.getMonth()]}, ${hr}:${m} ${ampm}`;
+}
+
+function color(pct) {
+  if (pct >= 95) return 'var(--danger)';
+  if (pct >= 70) return 'var(--warn)';
+  return 'var(--ok)';
+}
+
+function render(data) {
+  const root = document.getElementById('root');
+  const now = Date.now() / 1000;
+
+  // Summary strip
+  let html = '<div class="summary">';
+  for (const acct of data.accounts) {
+    const c = color(acct.pct);
+    html += `
+      <div class="summary-card">
+        <div class="acct">••${acct.account}</div>
+        <div class="free" style="color:${c}">${fmtInr(acct.available)}</div>
+      </div>`;
+  }
+  html += '</div>';
+
+  // Account cards
+  for (const acct of data.accounts) {
+    const c = color(acct.pct);
+    const pct = acct.pct;
+    const badgeBg = pct >= 95 ? 'rgba(240,62,62,0.12)' : pct >= 70 ? 'rgba(245,166,35,0.12)' : 'rgba(34,208,122,0.12)';
+
+    html += `
+    <div class="card" style="border-color:${pct>=70?c+'33':''}">
+      <div class="card-header">
+        <div class="card-title">••${acct.account}</div>
+        <div class="pct-badge" style="color:${c};background:${badgeBg}">${pct}% used</div>
+      </div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:${pct}%;background:${c}"></div>
+      </div>
+      <div class="amounts">
+        <div class="amt-block">
+          <div class="amt-label">Used</div>
+          <div class="amt-value" style="color:${c}">${fmtInr(acct.used)}</div>
+        </div>
+        <div class="amt-block" style="text-align:right">
+          <div class="amt-label">Available</div>
+          <div class="amt-value">${fmtInr(acct.available)}</div>
+        </div>
+      </div>`;
+
+    if (acct.transactions.length > 0) {
+      html += `<div class="txn-label">Transactions</div><div class="txn-list">`;
+      for (const t of acct.transactions) {
+        const releaseIn = t.releases_at - now;
+        const isSoon = releaseIn > 0 && releaseIn < 3600;
+        const relStr = t.releases_at > now ? `→ ${fmtDate(t.releases_at)}` : '✓ released';
+        html += `
+          <div class="txn-row">
+            <span class="txn-amt">${fmtInr(t.amount)}</span>
+            <span class="txn-release${isSoon?' soon':''}">${relStr}</span>
+          </div>`;
+      }
+      html += '</div>';
+    } else {
+      html += '<div class="no-txns">No transactions in last 24h</div>';
+    }
+
+    html += '</div>';
+  }
+
+  root.innerHTML = html;
+
+  // Footer
+  const footer = document.getElementById('footer');
+  footer.style.display = 'flex';
+
+  if (data.last_txn_ts) {
+    document.getElementById('last-txn').innerHTML = `Last txn: <span>${fmtDate(data.last_txn_ts)}</span>`;
+  }
+  document.getElementById('updated-at').innerHTML = `<span class="dot"></span>Live · refreshed ${fmtDate(data.server_ts)}`;
+}
+
+async function fetchData() {
+  const root = document.getElementById('root');
+  try {
+    const res = await fetch(API + '?t=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    render(data);
+  } catch(e) {
+    root.innerHTML = `<div class="state">⚠️ Could not reach server<br><br>${e.message}</div>`;
+  }
+}
+
+// Auto-refresh every 60 seconds
+fetchData();
+setInterval(fetchData, 60000);
+</script>
+</body>
+</html>
