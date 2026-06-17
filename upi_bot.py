@@ -6,6 +6,7 @@ import logging
 import threading
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request
+from flask_cors import CORS
 import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -22,6 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app)
 lock = threading.Lock()
 
 IST = timezone(timedelta(hours=5, minutes=30))
