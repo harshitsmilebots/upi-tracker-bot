@@ -17,7 +17,7 @@ PORT             = int(os.environ.get("PORT", 8080))
 DATA_FILE        = "transactions.json"
 LIMIT            = 100_000
 WINDOW           = 24 * 3600
-TRACKED_ACCOUNTS = {"0353", "3826", "1183"}
+TRACKED_ACCOUNTS = {"0353", "3826", "1183", "9421"}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -45,17 +45,27 @@ def prune(txns):
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 def parse_sms(text):
-    if "UPI Ref" not in text:
-        log.info("Skipping non-UPI message")
-        return None
-    amt_match  = re.search(r"Rs\.(\d+(?:\.\d+)?)", text)
-    acct_match = re.search(r"A/?[Cc] X(\d+)", text)
-    if amt_match and acct_match:
-        return {
-            "amount":  int(float(amt_match.group(1))),
-            "account": acct_match.group(1),
-            "ts":      time.time()
-        }
+    # ── Kotak format: "Sent Rs.X from Kotak Bank A/c XNNNN ... UPI Ref" ──
+    if "UPI Ref" in text and ("Kotak Bank AC X" in text or "Kotak Bank A/c X" in text):
+        amt_match  = re.search(r"Rs\.(\d+(?:\.\d+)?)", text)
+        acct_match = re.search(r"A/?[Cc] X(\d+)", text)
+        if amt_match and acct_match:
+            return {
+                "amount":  int(float(amt_match.group(1))),
+                "account": acct_match.group(1),
+                "ts":      time.time()
+            }
+    # ── SBI format: "Dear UPI user A/C XNNNN debited by X ... Refno" ──
+    if "debited by" in text and "Refno" in text and "SBI" in text:
+        amt_match  = re.search(r"debited by (\d+(?:\.\d+)?)", text)
+        acct_match = re.search(r"A/[Cc] X(\d+)", text)
+        if amt_match and acct_match:
+            return {
+                "amount":  int(float(amt_match.group(1))),
+                "account": acct_match.group(1),
+                "ts":      time.time()
+            }
+    log.info("Skipping unrecognized/non-UPI message")
     return None
 
 # ── Calculations ──────────────────────────────────────────────────────────────
@@ -104,6 +114,7 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
     u353,  a353,  r353,  o353  = calc(txns, "0353")
     u3826, a3826, r3826, o3826 = calc(txns, "3826")
     u1183, a1183, r1183, o1183 = calc(txns, "1183")
+    u9421, a9421, r9421, o9421 = calc(txns, "9421")
 
     lines = []
 
@@ -113,6 +124,7 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
     lines.append(f"••0353: {fmt_inr(a353)} free")
     lines.append(f"••3826: {fmt_inr(a3826)} free")
     lines.append(f"••1183: {fmt_inr(a1183)} free")
+    lines.append(f"••9421: {fmt_inr(a9421)} free")
     lines.append("")
 
     # ••0353 detail
@@ -153,6 +165,18 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
     else:
         lines.append("No transactions")
 
+    lines.append("")
+
+    # ••9421 detail
+    lines.append(f"*••9421*  {status_bar(u9421)}")
+    lines.append(f"Used: {fmt_inr(u9421)}  Available: {fmt_inr(a9421)}")
+    t9421 = sorted([t for t in txns if t["account"] == "9421"], key=lambda t: t["ts"])
+    if t9421:
+        for t in t9421:
+            lines.append(f"{fmt_inr(t['amount'])}  → {fmt_release(t['ts'] + WINDOW)}")
+    else:
+        lines.append("No transactions")
+
     now_str = datetime.now(IST).strftime("%-d %b, %-I:%M %p IST")
     all_txns = [t for t in txns if t["account"] in TRACKED_ACCOUNTS]
     if all_txns:
@@ -181,6 +205,8 @@ def parse_sync_message(text):
             current_account = "3826"
         elif "••1183" in line and "free" not in line:
             current_account = "1183"
+        elif "••9421" in line and "free" not in line:
+            current_account = "9421"
 
         # Match transaction lines:  9:07 AM  ₹24,895  → frees 27 May, 9:07 AM
         m = re.search(r"→ (\d+ \w+, \d+:\d+ [AP]M)", line)
@@ -256,7 +282,7 @@ def data():
         txns = prune(load_txns())
     
     accounts = []
-    for acct in ["0353", "3826", "1183"]:
+    for acct in ["0353", "3826", "1183", "9421"]:
         relevant = [t for t in txns if t["account"] == acct]
         used     = sum(t["amount"] for t in relevant)
         avail    = max(0, LIMIT - used)
@@ -358,6 +384,10 @@ def webhook():
                     txns = [t for t in txns if t["account"] != "1183"]
                     save_txns(txns)
                     send("✅ Cleared ••1183")
+                elif len(parts) > 1 and parts[1] == "9421":
+                    txns = [t for t in txns if t["account"] != "9421"]
+                    save_txns(txns)
+                    send("✅ Cleared ••9421")
                 elif len(parts) > 1 and parts[1] == "all":
                     save_txns([])
                     send("✅ All cleared")
@@ -399,7 +429,7 @@ def webhook():
             else:
                 send("⚠️ Couldn't parse any transactions from that message.")
 
-        elif "Sent Rs." in text and ("Kotak Bank AC X" in text or "Kotak Bank A/c X" in text):
+        elif ("Sent Rs." in text and ("Kotak Bank AC X" in text or "Kotak Bank A/c X" in text)) or ("debited by" in text and "Refno" in text and "SBI" in text):
             threading.Thread(target=process_sms, args=(text,)).start()
 
     return "ok", 200
