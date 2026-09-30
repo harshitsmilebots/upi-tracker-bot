@@ -49,7 +49,7 @@ def parse_sms(text):
         log.info("Skipping non-UPI message")
         return None
     amt_match  = re.search(r"Rs\.(\d+(?:\.\d+)?)", text)
-    acct_match = re.search(r"AC X(\d+)", text)
+    acct_match = re.search(r"A/?[Cc] X(\d+)", text)
     if amt_match and acct_match:
         return {
             "amount":  int(float(amt_match.group(1))),
@@ -399,7 +399,7 @@ def webhook():
             else:
                 send("⚠️ Couldn't parse any transactions from that message.")
 
-        elif "Sent Rs." in text and "Kotak Bank AC X" in text:
+        elif "Sent Rs." in text and ("Kotak Bank AC X" in text or "Kotak Bank A/c X" in text):
             threading.Thread(target=process_sms, args=(text,)).start()
 
     return "ok", 200
