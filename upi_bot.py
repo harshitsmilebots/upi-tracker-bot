@@ -184,6 +184,7 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
         last_str = datetime.fromtimestamp(last_ts, tz=IST).strftime("%-d %b, %-I:%M %p IST")
         lines.append(f"\n_Last txn: {last_str}_")
     lines.append(f"_{now_str}_")
+    lines.append("\nRefresh: /status")
 
     return "\n".join(lines)
 
