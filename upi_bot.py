@@ -14,13 +14,22 @@ BOT_TOKEN        = os.environ["BOT_TOKEN"].strip()
 CHAT_ID          = os.environ["CHAT_ID"].strip()
 WEBHOOK_URL      = os.environ["WEBHOOK_URL"].strip()
 PORT             = int(os.environ.get("PORT", 8080))
-DATA_FILE        = "transactions.json"
+# DATA_FILE points at the persistent Railway volume when DATA_DIR is set
+# (set DATA_DIR=/data as a Railway env var once the volume is mounted at /data).
+# Falls back to the working directory if no volume is configured.
+DATA_DIR         = os.environ.get("DATA_DIR", "").strip()
+DATA_FILE        = os.path.join(DATA_DIR, "transactions.json") if DATA_DIR else "transactions.json"
 LIMIT            = 100_000
 WINDOW           = 24 * 3600
 TRACKED_ACCOUNTS = {"0353", "3826", "1183", "9421"}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
+
+# Ensure the data directory exists (harmless if it already does)
+if DATA_DIR:
+    os.makedirs(DATA_DIR, exist_ok=True)
+log.info(f"Using data file: {DATA_FILE}")
 
 app = Flask(__name__)
 CORS(app)
@@ -102,6 +111,81 @@ def fmt_release(release_at):
 def fmt_ts(ts):
     ist = datetime.fromtimestamp(ts, tz=IST)
     return ist.strftime("%-I:%M %p")
+
+def normalize_account(s):
+    """Map a user-typed account token to a tracked account id, or None."""
+    s = s.lstrip("•").lstrip("xX").strip()
+    aliases = {
+        "353": "0353", "0353": "0353",
+        "3826": "3826",
+        "1183": "1183",
+        "9421": "9421",
+    }
+    return aliases.get(s)
+
+def parse_manual_datetime(date_str):
+    """
+    Parse a user-typed date/time for /add into an epoch timestamp (IST).
+    Accepts things like: '8 Oct 10:35am', '8 Oct 10:35', 'Oct 8 10:35am',
+    '8 Oct', '10:35am' (today). Returns None if unparseable.
+    Empty/blank -> now.
+    """
+    date_str = date_str.strip()
+    if not date_str:
+        return time.time()
+
+    now = datetime.now(IST)
+    year = now.year
+    txt = date_str.lower().replace(",", " ")
+    txt = " ".join(txt.split())  # collapse whitespace
+
+    # Separate a trailing time (e.g. "10:35am" or "10:35") from the date part
+    time_match = re.search(r"(\d{1,2}):(\d{2})\s*([ap]m)?", txt)
+    hour, minute = None, None
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        ampm = time_match.group(3)
+        if ampm == "pm" and hour != 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+        txt = txt.replace(time_match.group(0), "").strip()
+
+    # Parse the date part if present
+    day, month = None, None
+    months = {m.lower(): i for i, m in enumerate(
+        ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"], 1)}
+    dm = re.search(r"\b(\d{1,2})\b", txt)
+    mm = re.search(r"\b(" + "|".join(months.keys()) + r")", txt)
+    if dm:
+        day = int(dm.group(1))
+    if mm:
+        month = months[mm.group(1)]
+
+    # Build the datetime, filling in sensible defaults
+    if day is None:
+        day = now.day
+    if month is None:
+        month = now.month
+    if hour is None:
+        hour, minute = now.hour, now.minute
+
+    try:
+        dt = datetime(year, month, day, hour, minute, tzinfo=IST)
+    except ValueError:
+        return None
+    # If the constructed date is in the future (e.g. user typed a day that
+    # already passed into next month), roll back a month — but keep it simple:
+    if dt.timestamp() > time.time() + 300:  # >5 min in the future
+        # assume they meant last occurrence; step back a month
+        prev_month = month - 1 or 12
+        prev_year = year if month != 1 else year - 1
+        try:
+            dt = datetime(prev_year, prev_month, day, hour, minute, tzinfo=IST)
+        except ValueError:
+            pass
+    return dt.timestamp()
 
 def status_bar(used):
     pct    = min(used / LIMIT, 1.0)
@@ -334,10 +418,17 @@ def webhook():
         if text == "/help":
             help_text = (
                 "*UPI Tracker — Commands*\n\n"
-                "/status — current balances & transactions\n"
-                "/sync — restore from a pasted status message\n"
-                "/reset 353 · 3826 · 1183 · 9421 · all — clear an account\n"
-                "/remove AMOUNT ACCOUNT — delete one txn (e.g. /remove 9873 353)\n\n"
+                "/status — current balances & transactions\n\n"
+                "/add — log a missed transaction\n"
+                "   `/add ACCOUNT AMOUNT [date time]`\n"
+                "   • `/add 0353 21755` → logs it now\n"
+                "   • `/add 0353 21755 8 Oct 10:35am` → logs at that time\n\n"
+                "/remove — delete one txn\n"
+                "   `/remove AMOUNT ACCOUNT` (e.g. `/remove 9873 353`)\n\n"
+                "/reset — clear an account\n"
+                "   `/reset 353 · 3826 · 1183 · 9421 · all`\n\n"
+                "/sync — restore from a pasted status message\n\n"
+                "Accounts: 353, 3826, 1183, 9421\n"
                 "You can also paste a raw bank SMS to log it manually."
             )
             send(help_text)
@@ -347,6 +438,40 @@ def webhook():
                 txns = prune(load_txns())
                 save_txns(txns)
             send(build_status_message(txns))
+
+        elif text.startswith("/add"):
+            # /add ACCOUNT AMOUNT [date time]
+            # e.g. /add 0353 21755            -> logs now
+            #      /add 0353 21755 8 Oct 10:35am  -> logs at that time
+            parts = text.split()
+            if len(parts) < 3:
+                send("Usage: /add ACCOUNT AMOUNT [date time]\n"
+                     "Example: /add 0353 21755\n"
+                     "Example: /add 0353 21755 8 Oct 10:35am")
+            else:
+                acct = normalize_account(parts[1])
+                if not acct:
+                    send(f"⚠️ Unknown account '{parts[1]}'. Use 353, 3826, 1183 or 9421.")
+                else:
+                    try:
+                        amt = int(float(parts[2]))
+                    except ValueError:
+                        send(f"⚠️ '{parts[2]}' isn't a valid amount.")
+                        amt = None
+                    if amt is not None:
+                        date_part = " ".join(parts[3:])
+                        ts = parse_manual_datetime(date_part)
+                        if ts is None:
+                            send(f"⚠️ Couldn't read the date/time '{date_part}'.\n"
+                                 "Try: /add 0353 21755 8 Oct 10:35am")
+                        else:
+                            with lock:
+                                txns = prune(load_txns())
+                                txns.append({"account": acct, "amount": amt, "ts": ts})
+                                save_txns(txns)
+                            when = "now" if not date_part else fmt_release(ts)
+                            send(f"✅ Added {fmt_inr(amt)} to ••{acct} ({when})\n\n"
+                                 + build_status_message(prune(load_txns())))
 
         elif text.startswith("/reset"):
             parts = text.split()
@@ -379,7 +504,7 @@ def webhook():
             if len(parts) == 3:
                 try:
                     amt  = int(parts[1])
-                    acct = "0353" if parts[2] in ("353", "0353") else "3826"
+                    acct = normalize_account(parts[2]) or "0353"
                     with lock:
                         txns = prune(load_txns())
                         matches = [t for t in txns if t["account"] == acct and t["amount"] == amt]
