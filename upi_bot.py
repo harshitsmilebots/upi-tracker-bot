@@ -111,72 +111,40 @@ def status_bar(used):
     return f"{emoji} [{bar}] {int(pct*100)}%"
 
 def build_status_message(txns, trigger_account=None, trigger_amount=None):
-    u353,  a353,  r353,  o353  = calc(txns, "0353")
-    u3826, a3826, r3826, o3826 = calc(txns, "3826")
-    u1183, a1183, r1183, o1183 = calc(txns, "1183")
-    u9421, a9421, r9421, o9421 = calc(txns, "9421")
+    # Fixed display order
+    order = ["0353", "3826", "1183", "9421"]
+    data = {a: calc(txns, a) for a in order}   # a -> (used, avail, release_at, oldest_amt)
 
     lines = []
 
-    # Header — visible on lock screen
+    # Debit header (only on a transaction notification)
     if trigger_account and trigger_amount:
         lines.append(f"💳 {fmt_inr(trigger_amount)} debited · ••{trigger_account}")
-    lines.append(f"••0353: {fmt_inr(a353)} free")
-    lines.append(f"••3826: {fmt_inr(a3826)} free")
-    lines.append(f"••1183: {fmt_inr(a1183)} free")
-    lines.append(f"••9421: {fmt_inr(a9421)} free")
-    lines.append("")
 
-    # ••0353 detail
-    lines.append(f"*••0353*  {status_bar(u353)}")
-    lines.append(f"Used: {fmt_inr(u353)}  Available: {fmt_inr(a353)}")
-    # Transactions
-    t353 = sorted([t for t in txns if t["account"] == "0353"], key=lambda t: t["ts"])
-    if t353:
-        for t in t353:
-            rel = fmt_release(t["ts"] + WINDOW)
-            lines.append(f"{fmt_inr(t['amount'])}  → {rel}")
-    else:
-        lines.append("No transactions")
+    # ── Top block: all four, fixed order, "free" or "unused" ──
+    lines.append("──────────────")
+    for a in order:
+        used, avail, _, _ = data[a]
+        if used > 0:
+            lines.append(f"••{a}: {fmt_inr(avail)} free")
+        else:
+            lines.append(f"••{a}: unused")
+    lines.append("──────────────")
 
-    lines.append("")
-
-    # ••3826 detail
-    lines.append(f"*••3826*  {status_bar(u3826)}")
-    lines.append(f"Used: {fmt_inr(u3826)}  Available: {fmt_inr(a3826)}")
-    # Transactions
-    t3826 = sorted([t for t in txns if t["account"] == "3826"], key=lambda t: t["ts"])
-    if t3826:
-        for t in t3826:
-            rel = fmt_release(t["ts"] + WINDOW)
-            lines.append(f"{fmt_inr(t['amount'])}  → {rel}")
-    else:
-        lines.append("No transactions")
-
-    lines.append("")
-
-    # ••1183 detail
-    lines.append(f"*••1183*  {status_bar(u1183)}")
-    lines.append(f"Used: {fmt_inr(u1183)}  Available: {fmt_inr(a1183)}")
-    t1183 = sorted([t for t in txns if t["account"] == "1183"], key=lambda t: t["ts"])
-    if t1183:
-        for t in t1183:
+    # ── Detail blocks: only accounts with activity, fixed order ──
+    for a in order:
+        used, avail, _, _ = data[a]
+        acct_txns = sorted([t for t in txns if t["account"] == a], key=lambda t: t["ts"])
+        if not acct_txns:
+            continue
+        pct = min(round(used / LIMIT * 100), 100)
+        emoji = "🔴" if pct >= 95 else "🟡" if pct >= 70 else "🟢"
+        lines.append("")
+        lines.append(f"*••{a}*  {emoji} {pct}%")
+        for t in acct_txns:
             lines.append(f"{fmt_inr(t['amount'])}  → {fmt_release(t['ts'] + WINDOW)}")
-    else:
-        lines.append("No transactions")
 
-    lines.append("")
-
-    # ••9421 detail
-    lines.append(f"*••9421*  {status_bar(u9421)}")
-    lines.append(f"Used: {fmt_inr(u9421)}  Available: {fmt_inr(a9421)}")
-    t9421 = sorted([t for t in txns if t["account"] == "9421"], key=lambda t: t["ts"])
-    if t9421:
-        for t in t9421:
-            lines.append(f"{fmt_inr(t['amount'])}  → {fmt_release(t['ts'] + WINDOW)}")
-    else:
-        lines.append("No transactions")
-
+    # ── Footer ──
     now_str = datetime.now(IST).strftime("%-d %b, %-I:%M %p IST")
     all_txns = [t for t in txns if t["account"] in TRACKED_ACCOUNTS]
     if all_txns:
@@ -363,7 +331,18 @@ def webhook():
         if sender != CHAT_ID:
             return "ok", 200
 
-        if text == "/status":
+        if text == "/help":
+            help_text = (
+                "*UPI Tracker — Commands*\n\n"
+                "/status — current balances & transactions\n"
+                "/sync — restore from a pasted status message\n"
+                "/reset 353 · 3826 · 1183 · 9421 · all — clear an account\n"
+                "/remove AMOUNT ACCOUNT — delete one txn (e.g. /remove 9873 353)\n\n"
+                "You can also paste a raw bank SMS to log it manually."
+            )
+            send(help_text)
+
+        elif text == "/status":
             with lock:
                 txns = prune(load_txns())
                 save_txns(txns)
