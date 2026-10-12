@@ -19,9 +19,14 @@ PORT             = int(os.environ.get("PORT", 8080))
 # Falls back to the working directory if no volume is configured.
 DATA_DIR         = os.environ.get("DATA_DIR", "").strip()
 DATA_FILE        = os.path.join(DATA_DIR, "transactions.json") if DATA_DIR else "transactions.json"
+FASTAG_FILE      = os.path.join(DATA_DIR, "fastag.json") if DATA_DIR else "fastag.json"
 LIMIT            = 100_000
 WINDOW           = 24 * 3600
 TRACKED_ACCOUNTS = {"0353", "3826", "1183", "9421"}
+
+# FASTag low-balance alert thresholds (two tiers)
+FASTAG_T1        = 10_500   # first warning
+FASTAG_T2        = 6_000    # urgent warning
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -51,6 +56,81 @@ def save_txns(txns):
 def prune(txns):
     cutoff = time.time() - WINDOW
     return [t for t in txns if t["ts"] > cutoff]
+
+# ── FASTag persistence ────────────────────────────────────────────────────────
+def load_fastag():
+    if os.path.exists(FASTAG_FILE):
+        try:
+            with open(FASTAG_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"balance": None, "ts": None, "alert_t1": False, "alert_t2": False}
+
+def save_fastag(d):
+    with open(FASTAG_FILE, "w") as f:
+        json.dump(d, f)
+
+def parse_fastag(text):
+    """Extract the running balance from a Kotak FASTag toll SMS."""
+    if "FASTag" not in text:
+        return None
+    bal_match = re.search(r"Bal\.(\d+(?:\.\d+)?)", text)
+    if not bal_match:
+        return None
+    toll_match = re.search(r"Rs\.(\d+(?:\.\d+)?)", text)
+    return {
+        "balance": float(bal_match.group(1)),
+        "toll":    float(toll_match.group(1)) if toll_match else None,
+        "ts":      time.time(),
+    }
+
+def process_fastag(text):
+    """
+    Update stored FASTag balance silently. Alert only on threshold crossings:
+    - first time balance <= T1 (10,500)
+    - first time balance <= T2 (6,000)
+    Both re-arm once a recharge lifts balance back above T1.
+    """
+    parsed = parse_fastag(text)
+    if not parsed:
+        return False
+
+    bal   = parsed["balance"]
+    state = load_fastag()
+    state["balance"] = bal
+    state["ts"]      = parsed["ts"]
+
+    notify = None
+    if bal > FASTAG_T1:
+        # Recharged / healthy — re-arm both alerts for the next cycle
+        state["alert_t1"] = False
+        state["alert_t2"] = False
+    else:
+        if bal <= FASTAG_T2 and not state.get("alert_t2"):
+            state["alert_t2"] = True
+            state["alert_t1"] = True   # skip the milder one if we blew past it
+            notify = "t2"
+        elif bal <= FASTAG_T1 and not state.get("alert_t1"):
+            state["alert_t1"] = True
+            notify = "t1"
+
+    save_fastag(state)
+
+    if notify == "t2":
+        send(f"🔴 *FASTag critically low: {fmt_inr(bal)}*\n"
+             f"Recharge now to avoid trucks being stopped at toll.")
+    elif notify == "t1":
+        send(f"⚠️ *FASTag low: {fmt_inr(bal)}*\n"
+             f"Time to recharge soon.")
+    return True
+
+def fastag_line():
+    """One-line FASTag balance for status / debit messages, or None if unknown."""
+    state = load_fastag()
+    if state.get("balance") is not None:
+        return f"FASTag: {fmt_inr(state['balance'])}"
+    return None
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 def parse_sms(text):
@@ -213,6 +293,9 @@ def build_status_message(txns, trigger_account=None, trigger_amount=None):
             lines.append(f"••{a}: {fmt_inr(avail)} free")
         else:
             lines.append(f"••{a}: unused")
+    ft = fastag_line()
+    if ft:
+        lines.append(ft)
     lines.append("──────────────")
 
     # ── Detail blocks: only accounts with activity, fixed order ──
@@ -359,9 +442,11 @@ def data():
     last_ts = max((t["ts"] for t in txns), default=None)
     
     from flask import jsonify
+    fastag = load_fastag()
     return jsonify({
         "accounts":    accounts,
         "last_txn_ts": last_ts,
+        "fastag":      {"balance": fastag.get("balance"), "ts": fastag.get("ts")},
         "server_ts":   time.time()
     })
 
@@ -373,6 +458,16 @@ def sms_endpoint():
     if not text:
         return {"ok": False, "error": "no text"}, 400
     ok = process_sms(text)
+    return {"ok": ok}, 200
+
+@app.route("/fastag", methods=["POST"])
+def fastag_endpoint():
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "").strip()
+    log.info(f"/fastag received: {text[:80]!r}")
+    if not text:
+        return {"ok": False, "error": "no text"}, 400
+    ok = process_fastag(text)
     return {"ok": ok}, 200
 
 @app.route("/backfill", methods=["POST"])
@@ -429,7 +524,9 @@ def webhook():
                 "   `/reset 353 · 3826 · 1183 · 9421 · all`\n\n"
                 "/sync — restore from a pasted status message\n\n"
                 "Accounts: 353, 3826, 1183, 9421\n"
-                "You can also paste a raw bank SMS to log it manually."
+                "FASTag balance shows in every status; you're alerted only "
+                "when it drops below ₹10,500, then again below ₹6,000.\n\n"
+                "You can also paste a raw bank or FASTag SMS to log it manually."
             )
             send(help_text)
 
@@ -533,6 +630,9 @@ def webhook():
                 send(f"✅ Restored {len(txns)} transactions\n\n" + build_status_message(prune(txns)))
             else:
                 send("⚠️ Couldn't parse any transactions from that message.")
+
+        elif "FASTag" in text and "Bal." in text:
+            threading.Thread(target=process_fastag, args=(text,)).start()
 
         elif ("Sent Rs." in text and ("Kotak Bank AC X" in text or "Kotak Bank A/c X" in text)) or ("debited by" in text and "Refno" in text and "SBI" in text):
             threading.Thread(target=process_sms, args=(text,)).start()
