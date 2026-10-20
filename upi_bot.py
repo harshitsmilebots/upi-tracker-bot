@@ -20,6 +20,7 @@ PORT             = int(os.environ.get("PORT", 8080))
 DATA_DIR         = os.environ.get("DATA_DIR", "").strip()
 DATA_FILE        = os.path.join(DATA_DIR, "transactions.json") if DATA_DIR else "transactions.json"
 FASTAG_FILE      = os.path.join(DATA_DIR, "fastag.json") if DATA_DIR else "fastag.json"
+FASTAG_LOG_FILE  = os.path.join(DATA_DIR, "fastag_log.json") if DATA_DIR else "fastag_log.json"
 LIMIT            = 100_000
 WINDOW           = 24 * 3600
 TRACKED_ACCOUNTS = {"0353", "3826", "1183", "9421"}
@@ -27,6 +28,7 @@ TRACKED_ACCOUNTS = {"0353", "3826", "1183", "9421"}
 # FASTag low-balance alert thresholds (two tiers)
 FASTAG_T1        = 10_500   # first warning
 FASTAG_T2        = 6_000    # urgent warning
+FASTAG_LOG_DAYS  = 400      # keep ~13 months of toll history
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -71,18 +73,68 @@ def save_fastag(d):
     with open(FASTAG_FILE, "w") as f:
         json.dump(d, f)
 
+def load_fastag_log():
+    if os.path.exists(FASTAG_LOG_FILE):
+        try:
+            with open(FASTAG_LOG_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_fastag_log(log):
+    with open(FASTAG_LOG_FILE, "w") as f:
+        json.dump(log, f)
+
+def append_fastag_log(entry):
+    """Append one toll crossing, de-duping resent SMS and pruning old history."""
+    log = load_fastag_log()
+    for e in log:
+        if (e.get("vehicle") == entry.get("vehicle")
+                and e.get("plaza") == entry.get("plaza")
+                and e.get("toll") == entry.get("toll")
+                and abs(e.get("ts", 0) - entry.get("ts", 0)) < 90):
+            return log  # duplicate SMS — already logged
+    log.append(entry)
+    cutoff = time.time() - FASTAG_LOG_DAYS * 24 * 3600
+    log = [e for e in log if e.get("ts", 0) > cutoff]
+    save_fastag_log(log)
+    return log
+
 def parse_fastag(text):
-    """Extract the running balance from a Kotak FASTag toll SMS."""
+    """Extract balance, vehicle, plaza and crossing time from a Kotak FASTag SMS.
+
+    Sample:
+    Kotak FASTag:Rs.715.00 Toll paid at Nanduri for CG04MC6292 on
+    12-10-2026@12:42 .Bal.45763.60.Visit https://fastag.kotak.bank.in
+    """
     if "FASTag" not in text:
         return None
     bal_match = re.search(r"Bal\.(\d+(?:\.\d+)?)", text)
     if not bal_match:
         return None
     toll_match = re.search(r"Rs\.(\d+(?:\.\d+)?)", text)
+    # Plaza + vehicle together: "Toll paid at <plaza> for <VEHICLE> on"
+    pv = re.search(r"Toll paid at (.+?) for ([A-Z0-9]+) on", text)
+    plaza   = pv.group(1).strip() if pv else None
+    vehicle = pv.group(2).strip() if pv else None
+    # Use the SMS's own crossing time ("on 12-10-2026@12:42") when present,
+    # since a forwarded SMS may arrive late.
+    dtm = re.search(r"on (\d{2})-(\d{2})-(\d{4})@(\d{2}):(\d{2})", text)
+    if dtm:
+        d, mo, y, hh, mm = map(int, dtm.groups())
+        try:
+            ts = datetime(y, mo, d, hh, mm, tzinfo=IST).timestamp()
+        except ValueError:
+            ts = time.time()
+    else:
+        ts = time.time()
     return {
         "balance": float(bal_match.group(1)),
         "toll":    float(toll_match.group(1)) if toll_match else None,
-        "ts":      time.time(),
+        "vehicle": vehicle,
+        "plaza":   plaza,
+        "ts":      ts,
     }
 
 def process_fastag(text):
@@ -97,6 +149,16 @@ def process_fastag(text):
         return False
 
     bal   = parsed["balance"]
+
+    # Log the toll crossing for fleet analytics (only real toll events)
+    if parsed.get("vehicle"):
+        append_fastag_log({
+            "vehicle": parsed["vehicle"],
+            "plaza":   parsed["plaza"],
+            "toll":    parsed["toll"],
+            "ts":      parsed["ts"],
+        })
+
     state = load_fastag()
     state["balance"] = bal
     state["ts"]      = parsed["ts"]
@@ -131,6 +193,45 @@ def fastag_line():
     if state.get("balance") is not None:
         return f"FASTag: {fmt_inr(state['balance'])}"
     return None
+
+def build_fleet_message():
+    """Exact fleet metrics from the toll log (no trip inference)."""
+    log = load_fastag_log()
+    now = datetime.now(IST)
+    today = now.strftime("%Y-%m-%d")
+    month = now.strftime("%Y-%m")
+
+    def day_key(ts):  return datetime.fromtimestamp(ts, tz=IST).strftime("%Y-%m-%d")
+    def mon_key(ts):  return datetime.fromtimestamp(ts, tz=IST).strftime("%Y-%m")
+
+    today_e = [e for e in log if day_key(e["ts"]) == today]
+    month_e = [e for e in log if mon_key(e["ts"]) == month]
+
+    def summarize(entries):
+        trucks = sorted({e["vehicle"] for e in entries if e.get("vehicle")})
+        spend  = sum((e.get("toll") or 0) for e in entries)
+        return trucks, spend, len(entries)
+
+    t_trucks, t_spend, t_count = summarize(today_e)
+    m_trucks, m_spend, m_count = summarize(month_e)
+
+    lines = ["*🚚 Fleet — FASTag*"]
+    lines.append(f"\n*Today · {now.strftime('%-d %b')}*")
+    lines.append(f"Trucks running: {len(t_trucks)}")
+    lines.append(f"Toll crossings: {t_count}")
+    lines.append(f"Toll spend: {fmt_inr(t_spend)}")
+    if t_trucks:
+        lines.append("· " + ", ".join(t_trucks))
+    lines.append(f"\n*This month · {now.strftime('%b %Y')}*")
+    lines.append(f"Active trucks: {len(m_trucks)}")
+    lines.append(f"Toll crossings: {m_count}")
+    lines.append(f"Toll spend: {fmt_inr(m_spend)}")
+    ft = fastag_line()
+    if ft:
+        lines.append(f"\n{ft}")
+    if not log:
+        lines.append("\n_No toll data yet — it builds up as FASTag SMS arrive._")
+    return "\n".join(lines)
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 def parse_sms(text):
@@ -522,6 +623,7 @@ def webhook():
                 "   `/remove AMOUNT ACCOUNT` (e.g. `/remove 9873 353`)\n\n"
                 "/reset — clear an account\n"
                 "   `/reset 353 · 3826 · 1183 · 9421 · all`\n\n"
+                "/fleet — today & month: trucks running, toll spend\n\n"
                 "/sync — restore from a pasted status message\n\n"
                 "Accounts: 353, 3826, 1183, 9421\n"
                 "FASTag balance shows in every status; you're alerted only "
@@ -535,6 +637,9 @@ def webhook():
                 txns = prune(load_txns())
                 save_txns(txns)
             send(build_status_message(txns))
+
+        elif text == "/fleet":
+            send(build_fleet_message())
 
         elif text.startswith("/add"):
             # /add ACCOUNT AMOUNT [date time]
