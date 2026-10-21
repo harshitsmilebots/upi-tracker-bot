@@ -21,6 +21,7 @@ DATA_DIR         = os.environ.get("DATA_DIR", "").strip()
 DATA_FILE        = os.path.join(DATA_DIR, "transactions.json") if DATA_DIR else "transactions.json"
 FASTAG_FILE      = os.path.join(DATA_DIR, "fastag.json") if DATA_DIR else "fastag.json"
 FASTAG_LOG_FILE  = os.path.join(DATA_DIR, "fastag_log.json") if DATA_DIR else "fastag_log.json"
+DEBITS_LOG_FILE  = os.path.join(DATA_DIR, "debits_log.json") if DATA_DIR else "debits_log.json"
 LIMIT            = 100_000
 WINDOW           = 24 * 3600
 TRACKED_ACCOUNTS = {"0353", "3826", "1183", "9421"}
@@ -29,6 +30,7 @@ TRACKED_ACCOUNTS = {"0353", "3826", "1183", "9421"}
 FASTAG_T1        = 10_500   # first warning
 FASTAG_T2        = 6_000    # urgent warning
 FASTAG_LOG_DAYS  = 400      # keep ~13 months of toll history
+DASH_TOKEN       = os.environ.get("DASH_TOKEN", "").strip()  # guards read endpoints
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -58,6 +60,38 @@ def save_txns(txns):
 def prune(txns):
     cutoff = time.time() - WINDOW
     return [t for t in txns if t["ts"] > cutoff]
+
+# ── Permanent debit ledger (NOT pruned — this is the reconciliation history) ──
+# The 24h transactions.json drives the rolling limit; this keeps every debit
+# forever so reimbursement reconciliation has a month of history to match against.
+def load_debits_log():
+    if os.path.exists(DEBITS_LOG_FILE):
+        try:
+            with open(DEBITS_LOG_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_debits_log(log):
+    with open(DEBITS_LOG_FILE, "w") as f:
+        json.dump(log, f)
+
+def append_debit_log(entry):
+    """Append one debit to the permanent ledger, de-duping resent SMS."""
+    log = load_debits_log()
+    for e in log:
+        # strong de-dup on bank reference when present, else account+amount+time
+        if entry.get("ref") and e.get("ref") == entry.get("ref"):
+            return log
+        if (not entry.get("ref")
+                and e.get("account") == entry.get("account")
+                and e.get("amount") == entry.get("amount")
+                and abs(e.get("ts", 0) - entry.get("ts", 0)) < 90):
+            return log
+    log.append(entry)
+    save_debits_log(log)
+    return log
 
 # ── FASTag persistence ────────────────────────────────────────────────────────
 def load_fastag():
@@ -235,24 +269,32 @@ def build_fleet_message():
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 def parse_sms(text):
-    # ── Kotak format: "Sent Rs.X from Kotak Bank A/c XNNNN ... UPI Ref" ──
+    # ── Kotak format: "Sent Rs.X from Kotak Bank A/c XNNNN to <payee> on <date> ... UPI Ref <ref>" ──
     if "UPI Ref" in text and ("Kotak Bank AC X" in text or "Kotak Bank A/c X" in text):
         amt_match  = re.search(r"Rs\.(\d+(?:\.\d+)?)", text)
         acct_match = re.search(r"A/?[Cc] X(\d+)", text)
         if amt_match and acct_match:
+            payee = re.search(r"\bto (.+?) on \d{2}-\d{2}-\d{2}", text)
+            ref   = re.search(r"UPI Ref\s*(\d+)", text)
             return {
                 "amount":  int(float(amt_match.group(1))),
                 "account": acct_match.group(1),
+                "payee":   payee.group(1).strip() if payee else None,
+                "ref":     ref.group(1) if ref else None,
                 "ts":      time.time()
             }
-    # ── SBI format: "Dear UPI user A/C XNNNN debited by X ... Refno" ──
+    # ── SBI format: "Dear UPI user A/C XNNNN debited by X ... trf to <payee> Refno <ref>" ──
     if "debited by" in text and "Refno" in text and "SBI" in text:
         amt_match  = re.search(r"debited by (\d+(?:\.\d+)?)", text)
         acct_match = re.search(r"A/[Cc] X(\d+)", text)
         if amt_match and acct_match:
+            payee = re.search(r"trf to (.+?)\s+Refno", text)
+            ref   = re.search(r"Refno\s*(\d+)", text)
             return {
                 "amount":  int(float(amt_match.group(1))),
                 "account": acct_match.group(1),
+                "payee":   payee.group(1).strip() if payee else None,
+                "ref":     ref.group(1) if ref else None,
                 "ts":      time.time()
             }
     log.info("Skipping unrecognized/non-UPI message")
@@ -499,6 +541,14 @@ def process_sms(text):
         txns = prune(load_txns())
         txns.append(txn)
         save_txns(txns)
+        # Permanent ledger for reconciliation (unpruned)
+        append_debit_log({
+            "account": txn["account"],
+            "amount":  txn["amount"],
+            "payee":   txn.get("payee"),
+            "ref":     txn.get("ref"),
+            "ts":      txn["ts"],
+        })
     log.info(f"Saved txn: {txn}")
     send(build_status_message(txns, txn["account"], txn["amount"]))
     return True
@@ -511,6 +561,35 @@ def health():
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
+
+def _authed():
+    """True if the request carries the dashboard token (when one is configured)."""
+    if not DASH_TOKEN:
+        return False  # closed until a token is set
+    supplied = request.args.get("token") or request.headers.get("X-Token", "")
+    return supplied == DASH_TOKEN
+
+@app.route("/debits", methods=["GET"])
+def debits():
+    """Permanent debit ledger for reconciliation. Token-guarded.
+    Optional ?since=<epoch> and ?accounts=1183,9421 filters."""
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    with lock:
+        log = load_debits_log()
+    since = request.args.get("since")
+    if since:
+        try:
+            cutoff = float(since)
+            log = [e for e in log if e.get("ts", 0) >= cutoff]
+        except ValueError:
+            pass
+    accts = request.args.get("accounts")
+    if accts:
+        want = {a.strip() for a in accts.split(",")}
+        log = [e for e in log if e.get("account") in want]
+    from flask import jsonify
+    return jsonify({"count": len(log), "debits": sorted(log, key=lambda e: e.get("ts", 0))})
 
 @app.route("/data", methods=["GET"])
 def data():
