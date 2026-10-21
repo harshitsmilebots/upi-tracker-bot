@@ -31,6 +31,7 @@ FASTAG_T1        = 10_500   # first warning
 FASTAG_T2        = 6_000    # urgent warning
 FASTAG_LOG_DAYS  = 400      # keep ~13 months of toll history
 DASH_TOKEN       = os.environ.get("DASH_TOKEN", "").strip()  # guards read endpoints
+FLEET_SIZE       = int(os.environ.get("FLEET_SIZE", "45"))   # total trucks, for utilisation %
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -628,6 +629,61 @@ def data():
         "last_txn_ts": last_ts,
         "fastag":      {"balance": fastag.get("balance"), "ts": fastag.get("ts")},
         "server_ts":   time.time()
+    })
+
+@app.route("/fleetdata", methods=["GET"])
+def fleetdata():
+    """Utilisation from the FASTag toll log for a month (?month=YYYY-MM, default current).
+    Token-guarded. Returns per-truck per-day crossing counts + daily unique-active counts."""
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    from flask import jsonify
+    month = request.args.get("month") or datetime.now(IST).strftime("%Y-%m")
+    y, m = int(month[:4]), int(month[5:7])
+    # days in month
+    if m == 12:
+        nxt = datetime(y + 1, 1, 1, tzinfo=IST)
+    else:
+        nxt = datetime(y, m + 1, 1, tzinfo=IST)
+    start = datetime(y, m, 1, tzinfo=IST).timestamp()
+    end   = nxt.timestamp()
+    ndays = int((nxt - datetime(y, m, 1, tzinfo=IST)).days)
+
+    with lock:
+        log = [e for e in load_fastag_log() if start <= e.get("ts", 0) < end and e.get("vehicle")]
+
+    def day_of(ts):
+        return datetime.fromtimestamp(ts, tz=IST).day  # 1..ndays
+
+    trucks = sorted({e["vehicle"] for e in log})
+    matrix = {t: [0] * ndays for t in trucks}
+    for e in log:
+        matrix[e["vehicle"]][day_of(e["ts"]) - 1] += 1
+
+    per_day = [0] * ndays
+    for d in range(ndays):
+        per_day[d] = sum(1 for t in trucks if matrix[t][d] > 0)
+
+    per_truck_days = {t: sum(1 for c in matrix[t] if c > 0) for t in trucks}
+    active_truck_days = sum(per_truck_days.values())
+    seen = len(trucks)
+
+    return jsonify({
+        "month": month, "ndays": ndays, "fleet_size": FLEET_SIZE,
+        "trucks": trucks,
+        "matrix": matrix,                       # vehicle -> [counts per day]
+        "per_day_active": per_day,              # unique active trucks each day
+        "per_truck_days": per_truck_days,       # vehicle -> active day count
+        "summary": {
+            "avg_per_day": round(sum(per_day) / ndays, 1) if ndays else 0,
+            "active_truck_days": active_truck_days,
+            "trucks_seen": seen,
+            "idle_est": max(0, FLEET_SIZE - seen),
+            "busiest": max(per_day) if per_day else 0,
+            "toll_spend": round(sum((e.get("toll") or 0) for e in log)),
+            "crossings": len(log),
+        },
+        "server_ts": time.time(),
     })
 
 @app.route("/sms", methods=["POST"])
