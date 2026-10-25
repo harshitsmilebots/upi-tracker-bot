@@ -15,6 +15,16 @@
     --mono:'IBM Plex Mono',monospace;--sans:'Instrument Sans',system-ui,sans-serif;
     --shadow:0 1px 2px rgba(20,24,30,.04),0 1px 3px rgba(20,24,30,.06);
   }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1115;--panel:#171a20;--panel2:#1c2027;--line:#262b33;--ink:#e7eaef;--mute:#8a919c;--faint:#565d68;
+      --accent:#ff7a33;--accent-soft:rgba(255,122,51,.14);--green:#35d08a;--green-soft:rgba(53,208,138,.14);
+      --warn:#f5b53d;--warn-soft:rgba(245,181,61,.15);--red:#ff5a52;
+      --shadow:0 1px 2px rgba(0,0,0,.3),0 1px 3px rgba(0,0,0,.35);
+    }
+    .cell{background:#1c2027;border-color:#232832}
+    .cell.l1{background:rgba(255,122,51,.26)}.cell.l2{background:rgba(255,122,51,.48)}.cell.l3{background:rgba(255,122,51,.72)}.cell.l4{background:rgba(255,122,51,.98);border-color:transparent}
+  }
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
   .wrap{max-width:1180px;margin:0 auto;padding:0 20px 80px}
@@ -26,9 +36,15 @@
   .brand .by{font-size:12px;color:var(--mute)} .brand .by b{color:var(--ink);font-weight:600}
   .period{display:flex;align-items:center;gap:8px}
   .period input,.period button{background:var(--panel);border:1px solid var(--line);color:var(--ink);font-family:var(--mono);font-size:12px;padding:7px 10px;border-radius:7px;cursor:pointer;box-shadow:var(--shadow)}
-  nav{display:flex;gap:4px;margin:6px 0 22px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
-  .tab{font-weight:500;font-size:13.5px;color:var(--mute);background:none;border:none;border-bottom:2px solid transparent;padding:10px 14px;cursor:pointer;transition:.15s;white-space:nowrap}
-  .tab:hover{color:var(--ink)} .tab.on{color:var(--accent);border-bottom-color:var(--accent)}
+  nav{display:flex;gap:7px;margin:6px 0 22px;flex-wrap:wrap}
+  .tab{font-weight:500;font-size:13px;color:var(--mute);background:var(--panel);border:1px solid var(--line);border-radius:99px;padding:8px 15px;cursor:pointer;transition:.15s;white-space:nowrap;box-shadow:var(--shadow)}
+  .tab:hover{color:var(--ink);border-color:var(--faint)} .tab.on{color:#fff;background:var(--accent);border-color:var(--accent)}
+  .monthnav{display:flex;align-items:center;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
+  .monthnav button{background:var(--panel);border:none;color:var(--ink);font-family:var(--mono);font-size:14px;padding:7px 11px;cursor:pointer}
+  .monthnav button:hover{color:var(--accent)} .monthnav button:disabled{color:var(--faint);cursor:default}
+  .monthnav .lbl{font-family:var(--mono);font-size:12px;padding:7px 10px;min-width:92px;text-align:center;border-left:1px solid var(--line);border-right:1px solid var(--line);background:var(--panel2)}
+  .lockbtn{background:none;border:none;color:var(--faint);cursor:pointer;font-size:13px;padding:6px;border-radius:6px}
+  .lockbtn:hover{color:var(--mute)}
   .view{display:none} .view.on{display:block;animation:fade .2s ease}
   @keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
   .row{display:grid;gap:14px} .cards{grid-template-columns:repeat(4,1fr)}
@@ -105,8 +121,12 @@
       <div><h1>Fleet Ledger</h1><div class="by">by <b>SmileBots</b> · internal fleet &amp; finance</div></div>
     </div>
     <div class="period">
-      <input id="monthPick" type="month">
-      <button onclick="logout()">Lock</button>
+      <div class="monthnav">
+        <button id="mPrev" onclick="stepMonth(-1)" title="Previous month">‹</button>
+        <span class="lbl" id="mLbl">—</span>
+        <button id="mNext" onclick="stepMonth(1)" title="Next month">›</button>
+      </div>
+      <button class="lockbtn" onclick="logout()" title="Lock">🔒</button>
     </div>
   </header>
   <nav>
@@ -130,6 +150,25 @@
 <script>
 const TKEY='fleet_token';
 let TOKEN=localStorage.getItem(TKEY)||'';
+const PARSE_PROMPT=`You are converting a WhatsApp chat export (.txt) from a diesel/fuel vendor into structured fuel records for a fleet finance tool. Output ONLY a JSON array — no prose, no code fences.
+
+Each element must be:
+{"id":"<16 hex>","date":"YYYY-MM-DD","ts":<unix seconds in Asia/Kolkata>,"amount":<integer rupees>,"kind":"fuel","truck":"<last 4 digits of truck reg, or null>","rate":<rupees per litre or null>,"litres":<integer or null>,"vendor":"<the chat/vendor name>","raw":"<the source line, max 120 chars>"}
+
+Rules:
+- Every message begins like "[DD/MM/YY, H:MM:SS AM] Sender: text"; lines without that bracket are continuations of the previous message. Use the message timestamp (IST, UTC+5:30) for date and ts.
+- Extract fuel payments. Common forms (Hindi/Hinglish, misspellings like dissel/disel are normal):
+  • "NNNN ka diesel payment" then "RATE*LITRES=AMOUNT"
+  • "LITRES * RATE = AMOUNT"  (the value between ~60 and 140 is the rate)
+  • "AMOUNT dissel LITRES liter"
+  • "Diesel -LITRESltr=AMOUNT"
+  • "NNNN ke liye dissel AMOUNT"
+- "NNNN" (3-4 digits) stated with a diesel mention is the truck's last 4 digits; attach it to the amount that follows. If none, truck=null.
+- amount is the rupee total; ignore phone numbers and reference numbers. Keep only rows where 300 <= amount <= 500000.
+- If rate and litres are both known, keep both; if only one, derive the other where sensible, else null.
+- id = first 16 hex chars of md5("vendor|date|amount|truck|litres").  De-duplicate on id.
+
+Then, on the Fleet Ledger dashboard → Fuel tab → Import, upload the JSON file.`;
 let MONTH=new Date().toISOString().slice(0,7);
 const ORDER=['0353','3826','1183','9421'];
 let charts={};
@@ -212,7 +251,7 @@ async function renderUpiSpend(){
       type:'bar',
       data:{labels,datasets:[{label:'Total spend',data:s.per_day_total,backgroundColor:'#f3631b',borderRadius:4,maxBarThickness:22}]},
       options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>'₹'+c.parsed.y.toLocaleString('en-IN')}}},
-        scales:{y:{ticks:{callback:v=>'₹'+(v/1000)+'k'},grid:{color:'#eef1f4'}},x:{grid:{display:false}}},
+        scales:{y:{ticks:{callback:v=>'₹'+(v/1000)+'k'},grid:{color:Chart.defaults.borderColor}},x:{grid:{display:false}}},
         onClick:(evt,els)=>{if(!els.length)return;const d=els[0].index;
           const parts=ORDER.map(a=>`••${a} ${inr(s.per_day_by_account[a][d])}`).filter((_,i)=>s.per_day_by_account[ORDER[i]][d]>0);
           document.getElementById('upiDayDetail').innerHTML=`<b>${d+1} ${MONTH}</b> · total ${inr(s.per_day_total[d])}  —  `+(parts.join('  ·  ')||'no spend');
@@ -250,7 +289,7 @@ async function renderUtil(){
     const labels=d.per_day_active.map((_,i)=>i+1);
     mkChart('utilChart',{type:'bar',data:{labels,datasets:[{data:d.per_day_active,backgroundColor:'#f3631b',borderRadius:4,maxBarThickness:22}]},
       options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.y+' trucks'}}},
-        scales:{y:{beginAtZero:true,grid:{color:'#eef1f4'}},x:{grid:{display:false}}}}});
+        scales:{y:{beginAtZero:true,grid:{color:Chart.defaults.borderColor}},x:{grid:{display:false}}}}});
   }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
 }
 
@@ -271,7 +310,7 @@ async function renderFastag(){
     const labels=fd.per_day_spend.map((_,i)=>i+1);
     mkChart('fastagChart',{type:'bar',data:{labels,datasets:[{data:fd.per_day_spend,backgroundColor:'#f3631b',borderRadius:4,maxBarThickness:22}]},
       options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>'₹'+c.parsed.y.toLocaleString('en-IN')}}},
-        scales:{y:{beginAtZero:true,ticks:{callback:v=>'₹'+(v/1000)+'k'},grid:{color:'#eef1f4'}},x:{grid:{display:false}}},
+        scales:{y:{beginAtZero:true,ticks:{callback:v=>'₹'+(v/1000)+'k'},grid:{color:Chart.defaults.borderColor}},x:{grid:{display:false}}},
         onClick:(evt,els)=>{if(!els.length)return;const i=els[0].index;document.getElementById('ftDay').innerHTML=`<b>${i+1} ${MONTH}</b> · ${inr(fd.per_day_spend[i])}`;}}});
   }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
 }
@@ -319,8 +358,11 @@ async function renderFuel(){
       {k:'Fuellings',v:d.fuellings,s:'this month'},
     ]);
     h+=`<div class="section"><div class="hd"><h2>Import WhatsApp export</h2></div>`+
-       `<div class="hint">Drop the two chat exports into Claude; it returns a parsed <b>.json</b>. Pick that file here to load the fuellings — it de-dupes, so re-importing is safe.</div>`+
-       `<div style="padding:16px 18px"><input type="file" id="fuelFile" accept=".json" style="display:none" onchange="doImport(this)"><button class="btn pri" onclick="document.getElementById('fuelFile').click()">Choose parsed .json…</button> <span id="importMsg" style="font-family:var(--mono);font-size:12px;color:var(--mute);margin-left:10px"></span></div></div>`;
+       `<div class="hint">Export each vendor chat <b>Without Media</b> (text only). Give the .txt to <b>any</b> AI with the prompt below — it returns a parsed <b>.json</b>. Upload that here; it de-dupes, so re-importing is always safe.</div>`+
+       `<div style="padding:16px 18px"><input type="file" id="fuelFile" accept=".json" style="display:none" onchange="doImport(this)"><button class="btn pri" onclick="document.getElementById('fuelFile').click()">Choose parsed .json…</button> <span id="importMsg" style="font-family:var(--mono);font-size:12px;color:var(--mute);margin-left:10px"></span></div>`+
+       `<div style="padding:0 18px 18px"><details><summary style="cursor:pointer;font-size:13px;color:var(--accent);font-weight:600">Parsing prompt — copy into any AI (so this never depends on one chat)</summary>`+
+       `<div style="margin-top:10px"><button class="btn" onclick="copyPrompt()">⧉ Copy prompt</button> <span id="copyMsg" style="font-family:var(--mono);font-size:12px;color:var(--mute);margin-left:8px"></span></div>`+
+       `<pre id="promptText" style="margin-top:10px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:14px;font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;line-height:1.55;color:var(--ink);max-height:280px;overflow:auto"></pre></div></div></div>`;
     if(d.trucks&&d.trucks.length){
       let rows='';d.trucks.forEach(t=>{rows+=`<tr><td class="acct">${t.truck}</td><td class="num">${t.fuellings}</td><td class="num">${t.litres.toLocaleString('en-IN')} L</td><td class="num">${inr(t.spend)}</td><td class="num">${t.avg_rate||'—'}</td></tr>`;});
       h+=`<div class="section"><div class="hd"><h2>Per-truck fuel · ${MONTH}</h2></div><div style="overflow-x:auto"><table><thead><tr><th>Truck</th><th class="num">Fuellings</th><th class="num">Litres</th><th class="num">Spend</th><th class="num">Avg rate</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
@@ -328,7 +370,13 @@ async function renderFuel(){
       h+='<div class="section"><div class="empty"><div class="big">No fuel data for '+MONTH+'</div>Import a parsed export above.</div></div>';
     }
     el.innerHTML=h;
+    const pt=document.getElementById('promptText');if(pt)pt.textContent=PARSE_PROMPT;
   }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
+}
+function copyPrompt(){
+  navigator.clipboard.writeText(PARSE_PROMPT).then(()=>{
+    const m=document.getElementById('copyMsg');if(m){m.textContent='copied ✓';setTimeout(()=>m.textContent='',2000);}
+  }).catch(()=>{const m=document.getElementById('copyMsg');if(m)m.textContent='copy failed — select manually';});
 }
 function doImport(input){
   const f=input.files[0];if(!f)return;
@@ -345,9 +393,28 @@ function doImport(input){
   rd.readAsText(f);
 }
 
+const THIS_MONTH=new Date().toISOString().slice(0,7);
+function monthLabel(m){const[y,mo]=m.split('-');const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return M[+mo-1]+' '+y;}
+function stepMonth(delta){
+  const[y,mo]=MONTH.split('-').map(Number);const d=new Date(y,mo-1+delta,1);
+  const nm=d.toISOString().slice(0,7);
+  if(nm>THIS_MONTH)return; // don't go into the future
+  MONTH=nm;updateMonthUI();renderAll();
+}
+function updateMonthUI(){
+  document.getElementById('mLbl').textContent=monthLabel(MONTH);
+  document.getElementById('mNext').disabled=(MONTH>=THIS_MONTH);
+}
+// Chart.js theme-aware defaults
+function themeCharts(){
+  if(!window.Chart)return;
+  const dark=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;
+  Chart.defaults.color=dark?'#8a919c':'#737b87';
+  Chart.defaults.borderColor=dark?'#262b33':'#eef1f4';
+}
 function boot(){
-  document.getElementById('monthPick').value=MONTH;
-  document.getElementById('monthPick').onchange=e=>{MONTH=e.target.value;renderAll();};
+  themeCharts();
+  MONTH=THIS_MONTH;updateMonthUI();
   renderAll();
 }
 function renderAll(){renderUpi();renderUtil();renderFastag();renderReimb();renderFuel();}
