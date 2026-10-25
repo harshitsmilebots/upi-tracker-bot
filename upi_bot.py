@@ -22,6 +22,7 @@ DATA_FILE        = os.path.join(DATA_DIR, "transactions.json") if DATA_DIR else 
 FASTAG_FILE      = os.path.join(DATA_DIR, "fastag.json") if DATA_DIR else "fastag.json"
 FASTAG_LOG_FILE  = os.path.join(DATA_DIR, "fastag_log.json") if DATA_DIR else "fastag_log.json"
 DEBITS_LOG_FILE  = os.path.join(DATA_DIR, "debits_log.json") if DATA_DIR else "debits_log.json"
+EXPENSES_FILE    = os.path.join(DATA_DIR, "expenses_log.json") if DATA_DIR else "expenses_log.json"
 LIMIT            = 100_000
 WINDOW           = 24 * 3600
 TRACKED_ACCOUNTS = {"0353", "3826", "1183", "9421"}
@@ -104,6 +105,40 @@ def append_debit_log(entry):
     log.append(entry)
     save_debits_log(log)
     return log
+
+# ── Parsed business expenses (from WhatsApp exports, parsed by Claude) ────────
+def load_expenses():
+    if os.path.exists(EXPENSES_FILE):
+        try:
+            with open(EXPENSES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_expenses(rows):
+    with open(EXPENSES_FILE, "w") as f:
+        json.dump(rows, f)
+
+def merge_expenses(new_rows):
+    """Merge parsed expense rows, de-duping on a stable id (or date+amount+raw)."""
+    existing = load_expenses()
+    seen = set()
+    for e in existing:
+        seen.add(e.get("id") or f"{e.get('date')}|{e.get('amount')}|{e.get('raw','')[:40]}")
+    added = 0
+    for r in new_rows:
+        key = r.get("id") or f"{r.get('date')}|{r.get('amount')}|{r.get('raw','')[:40]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        existing.append(r)
+        added += 1
+    save_expenses(existing)
+    return added, len(existing)
+
+def _ist_day(ts):
+    return datetime.fromtimestamp(ts, tz=IST).strftime("%Y-%m-%d")
 
 # ── FASTag persistence ────────────────────────────────────────────────────────
 def load_fastag():
@@ -679,21 +714,31 @@ def fleetdata():
         matrix[e["vehicle"]][day_of(e["ts"]) - 1] += 1
 
     per_day = [0] * ndays
+    per_day_spend = [0] * ndays
     for d in range(ndays):
         per_day[d] = sum(1 for t in trucks if matrix[t][d] > 0)
+    for e in log:
+        per_day_spend[day_of(e["ts"]) - 1] += (e.get("toll") or 0)
+    per_day_spend = [round(x) for x in per_day_spend]
 
     per_truck_days = {t: sum(1 for c in matrix[t] if c > 0) for t in trucks}
     active_truck_days = sum(per_truck_days.values())
     seen = len(trucks)
+    # Average over days that actually had toll activity — not calendar days —
+    # so partial months and monsoon idle days don't drag it down.
+    active_days = sum(1 for d in range(ndays) if per_day[d] > 0)
+    avg_active = round(active_truck_days / active_days, 1) if active_days else 0
 
     return jsonify({
         "month": month, "ndays": ndays, "fleet_size": FLEET_SIZE,
         "trucks": trucks,
         "matrix": matrix,                       # vehicle -> [counts per day]
         "per_day_active": per_day,              # unique active trucks each day
+        "per_day_spend": per_day_spend,         # toll spend each day
         "per_truck_days": per_truck_days,       # vehicle -> active day count
         "summary": {
-            "avg_per_day": round(sum(per_day) / ndays, 1) if ndays else 0,
+            "avg_per_active_day": avg_active,   # avg trucks on days that ran
+            "active_days": active_days,
             "active_truck_days": active_truck_days,
             "trucks_seen": seen,
             "idle_est": max(0, FLEET_SIZE - seen),
@@ -701,6 +746,153 @@ def fleetdata():
             "toll_spend": round(sum((e.get("toll") or 0) for e in log)),
             "crossings": len(log),
         },
+        "server_ts": time.time(),
+    })
+
+@app.route("/spend", methods=["GET"])
+def spend():
+    """Per-day UPI spend per account for a month (?month=YYYY-MM). Token-guarded.
+    From the permanent debit ledger."""
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    from flask import jsonify
+    month = request.args.get("month") or datetime.now(IST).strftime("%Y-%m")
+    y, m = int(month[:4]), int(month[5:7])
+    nxt = datetime(y + 1, 1, 1, tzinfo=IST) if m == 12 else datetime(y, m + 1, 1, tzinfo=IST)
+    start = datetime(y, m, 1, tzinfo=IST).timestamp()
+    end   = nxt.timestamp()
+    ndays = (nxt - datetime(y, m, 1, tzinfo=IST)).days
+    order = ["0353", "3826", "1183", "9421"]
+
+    with lock:
+        log = [e for e in load_debits_log() if start <= e.get("ts", 0) < end]
+
+    # per_day_total[d] and per_day_by_acct[acct][d]
+    per_day_total = [0] * ndays
+    by_acct = {a: [0] * ndays for a in order}
+    month_total_by_acct = {a: 0 for a in order}
+    for e in log:
+        a = e.get("account")
+        if a not in by_acct:
+            continue
+        d = datetime.fromtimestamp(e["ts"], tz=IST).day - 1
+        amt = e.get("amount", 0)
+        by_acct[a][d] += amt
+        per_day_total[d] += amt
+        month_total_by_acct[a] += amt
+
+    return jsonify({
+        "month": month, "ndays": ndays, "accounts": order,
+        "per_day_total": [round(x) for x in per_day_total],
+        "per_day_by_account": {a: [round(x) for x in by_acct[a]] for a in order},
+        "month_total_by_account": {a: round(month_total_by_acct[a]) for a in order},
+        "ledger_starts": min((e["ts"] for e in load_debits_log()), default=None),
+        "server_ts": time.time(),
+    })
+
+@app.route("/import", methods=["POST"])
+def import_expenses():
+    """Accept Claude-parsed business-expense rows (JSON). Token-guarded.
+    Body: {"rows": [{id?, date 'YYYY-MM-DD', ts?, amount, kind 'fuel'|'other',
+                     truck?, rate?, litres?, vendor?, raw?}, ...]}"""
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    data = request.get_json(silent=True) or {}
+    rows = data.get("rows", [])
+    if not isinstance(rows, list) or not rows:
+        return {"ok": False, "error": "no rows"}, 400
+    # normalise ts from date if missing
+    for r in rows:
+        if not r.get("ts") and r.get("date"):
+            try:
+                d = datetime.strptime(r["date"], "%Y-%m-%d").replace(tzinfo=IST)
+                r["ts"] = d.timestamp()
+            except Exception:
+                pass
+    with lock:
+        added, total = merge_expenses(rows)
+    log.info(f"/import: +{added} expenses (total {total})")
+    return {"ok": True, "added": added, "total": total}, 200
+
+@app.route("/fuel", methods=["GET"])
+def fuel():
+    """Per-truck fuel summary for a month (?month=YYYY-MM). Token-guarded."""
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    from flask import jsonify
+    month = request.args.get("month") or datetime.now(IST).strftime("%Y-%m")
+    with lock:
+        rows = [r for r in load_expenses()
+                if r.get("kind") == "fuel" and str(r.get("date", "")).startswith(month)]
+    trucks = {}
+    for r in rows:
+        t = r.get("truck") or "—"
+        d = trucks.setdefault(t, {"truck": t, "fuellings": 0, "litres": 0.0, "spend": 0})
+        d["fuellings"] += 1
+        d["litres"] += (r.get("litres") or 0)
+        d["spend"]  += (r.get("amount") or 0)
+    out = sorted(trucks.values(), key=lambda x: -x["spend"])
+    for d in out:
+        d["litres"] = round(d["litres"], 1)
+        d["avg_rate"] = round(d["spend"] / d["litres"], 2) if d["litres"] else None
+    tot_spend  = sum(d["spend"] for d in out)
+    tot_litres = round(sum(d["litres"] for d in out), 1)
+    return jsonify({
+        "month": month, "trucks": out,
+        "total_spend": tot_spend, "total_litres": tot_litres,
+        "fuellings": len(rows),
+        "avg_rate": round(tot_spend / tot_litres, 2) if tot_litres else None,
+        "server_ts": time.time(),
+    })
+
+@app.route("/reimbursement", methods=["GET"])
+def reimbursement():
+    """Reconcile personal-account (1183/9421) debits against business expenses
+    from the chat, by amount + date (±1 day), one-to-one. Token-guarded."""
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    from flask import jsonify
+    month = request.args.get("month") or datetime.now(IST).strftime("%Y-%m")
+    personal = {"1183", "9421"}
+
+    with lock:
+        debits   = [e for e in load_debits_log()
+                    if e.get("account") in personal and str(_ist_day(e["ts"])).startswith(month)]
+        expenses = list(load_expenses())
+
+    # index expenses by amount for quick lookup; track consumption (one-to-one)
+    exp_by_amt = {}
+    for i, x in enumerate(expenses):
+        exp_by_amt.setdefault(round(x.get("amount", -1)), []).append(i)
+    consumed = set()
+    DAY = 86400
+
+    results = []
+    for e in sorted(debits, key=lambda x: x["ts"]):
+        amt = round(e.get("amount", 0))
+        cands = [i for i in exp_by_amt.get(amt, [])
+                 if i not in consumed and abs(expenses[i].get("ts", 0) - e["ts"]) <= 1.5 * DAY]
+        if len(cands) == 1:
+            consumed.add(cands[0])
+            x = expenses[cands[0]]
+            status = "business"
+            match = x.get("truck") or x.get("vendor") or "business expense"
+        elif len(cands) == 0:
+            status = "personal"; match = None
+        else:
+            status = "review"; match = f"{len(cands)} possible matches"
+        results.append({
+            "ts": e["ts"], "date": _ist_day(e["ts"]), "account": e["account"],
+            "amount": e["amount"], "payee": e.get("payee"),
+            "status": status, "match": match,
+        })
+
+    tot = {"business": 0, "personal": 0, "review": 0}
+    for r in results:
+        tot[r["status"]] += r["amount"]
+    return jsonify({
+        "month": month, "rows": results, "totals": tot,
+        "has_expenses": len(expenses) > 0,
         "server_ts": time.time(),
     })
 

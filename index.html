@@ -5,12 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Fleet Ledger — SmileBots</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
   :root{
     --bg:#f4f6f8;--panel:#fff;--panel2:#f7f9fb;--line:#e5e8ed;--ink:#1b1e24;--mute:#737b87;--faint:#aab0ba;
     --accent:#f3631b;--accent-soft:rgba(243,99,27,.10);--green:#15a35b;--green-soft:rgba(21,163,91,.12);
-    --warn:#c67b05;--warn-soft:rgba(198,123,5,.13);
+    --warn:#c67b05;--warn-soft:rgba(198,123,5,.13);--red:#dc3b32;
     --mono:'IBM Plex Mono',monospace;--sans:'Instrument Sans',system-ui,sans-serif;
     --shadow:0 1px 2px rgba(20,24,30,.04),0 1px 3px rgba(20,24,30,.06);
   }
@@ -23,8 +24,8 @@
   .sb-mark span{color:#fff;font-weight:600;font-size:13px}
   .brand h1{font-weight:600;font-size:20px;letter-spacing:-.01em}
   .brand .by{font-size:12px;color:var(--mute)} .brand .by b{color:var(--ink);font-weight:600}
-  .period{font-family:var(--mono);font-size:12px;color:var(--mute);display:flex;align-items:center;gap:8px}
-  .period select,.period button{background:var(--panel);border:1px solid var(--line);color:var(--ink);font-family:var(--mono);font-size:12px;padding:7px 10px;border-radius:7px;cursor:pointer;box-shadow:var(--shadow)}
+  .period{display:flex;align-items:center;gap:8px}
+  .period input,.period button{background:var(--panel);border:1px solid var(--line);color:var(--ink);font-family:var(--mono);font-size:12px;padding:7px 10px;border-radius:7px;cursor:pointer;box-shadow:var(--shadow)}
   nav{display:flex;gap:4px;margin:6px 0 22px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
   .tab{font-weight:500;font-size:13.5px;color:var(--mute);background:none;border:none;border-bottom:2px solid transparent;padding:10px 14px;cursor:pointer;transition:.15s;white-space:nowrap}
   .tab:hover{color:var(--ink)} .tab.on{color:var(--accent);border-bottom-color:var(--accent)}
@@ -34,7 +35,7 @@
   @media(max-width:820px){.cards{grid-template-columns:repeat(2,1fr)}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 16px;box-shadow:var(--shadow)}
   .card .k{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute)}
-  .card .v{font-family:var(--mono);font-weight:600;font-size:25px;margin-top:8px;letter-spacing:-.02em}
+  .card .v{font-family:var(--mono);font-weight:600;font-size:23px;margin-top:8px;letter-spacing:-.02em}
   .card .s{font-size:12px;color:var(--mute);margin-top:4px}
   .v.accent{color:var(--accent)}.v.green{color:var(--green)}.v.warn{color:var(--warn)}
   .section{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-top:16px;overflow:hidden;box-shadow:var(--shadow)}
@@ -44,40 +45,44 @@
   .hint b{color:var(--ink);font-weight:600}
   .empty{padding:40px 18px;text-align:center;color:var(--mute)}
   .empty .big{font-weight:600;font-size:16px;color:var(--ink);margin-bottom:6px}
+  .btn{font-family:var(--mono);font-size:12px;font-weight:500;background:var(--panel);border:1px solid var(--line);color:var(--ink);padding:8px 12px;border-radius:7px;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:7px}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.pri{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600} .btn.pri:hover{filter:brightness(1.05);color:#fff}
   table{width:100%;border-collapse:collapse}
   th{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);text-align:left;padding:11px 18px;border-bottom:1px solid var(--line);font-weight:500}
   td{padding:12px 18px;border-bottom:1px solid var(--line);font-size:13px} tr:last-child td{border-bottom:none}
   tbody tr:hover{background:var(--panel2)}
   .num{font-family:var(--mono);text-align:right;white-space:nowrap} .dt{font-family:var(--mono);color:var(--mute);white-space:nowrap}
   .acct{font-family:var(--mono);font-size:12px;color:var(--mute)}
-  .chart{padding:18px} .chart .ymax{font-family:var(--mono);font-size:10px;color:var(--faint);margin-bottom:6px}
-  .cols{display:flex;align-items:flex-end;gap:3px;height:150px;border-bottom:1px solid var(--line)}
-  .col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;position:relative}
-  .col .bar{width:100%;max-width:20px;background:var(--accent);border-radius:3px 3px 0 0;opacity:.88}
-  .col:hover .bar{opacity:1}
-  .col .tip{position:absolute;top:-24px;font-family:var(--mono);font-size:10px;background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:2px 6px;opacity:0;pointer-events:none;white-space:nowrap;box-shadow:var(--shadow);z-index:3}
-  .col:hover .tip{opacity:1}
-  .xaxis{display:flex;gap:3px;margin-top:6px} .xaxis .x{flex:1;text-align:center;font-family:var(--mono);font-size:9px;color:var(--faint)}
+  .pill{font-family:var(--mono);font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:3px 8px;border-radius:5px;font-weight:500;white-space:nowrap}
+  .pill.biz{background:var(--green-soft);color:var(--green)}.pill.per{background:rgba(115,123,135,.14);color:var(--mute)}.pill.rev{background:var(--warn-soft);color:var(--warn)}
+  /* status mirror */
+  .statusbox{font-family:var(--mono);font-size:13px;padding:16px 18px;white-space:pre-wrap;line-height:1.7}
+  .sb-head{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px}
+  .sb-head .it{font-family:var(--mono);font-size:13px} .sb-head .it b{font-weight:600}
+  .acctblock{border-top:1px solid var(--line);padding:12px 0 2px}
+  .acctblock .top{display:flex;justify-content:space-between;font-weight:600;margin-bottom:4px}
+  .acctblock .tx{color:var(--mute);font-size:12px;display:flex;justify-content:space-between;max-width:420px}
+  .chartwrap{padding:16px 18px} .chartwrap canvas{max-height:230px}
+  .daydetail{font-family:var(--mono);font-size:12px;color:var(--mute);padding:0 18px 16px;min-height:20px}
+  .daydetail b{color:var(--ink)}
   .heat-scroll{overflow-x:auto;padding:14px 18px 18px} .heat{border-collapse:separate;border-spacing:3px}
   .heat th.day{font-family:var(--mono);font-size:9px;color:var(--faint);font-weight:400;text-align:center;padding:0 0 4px;min-width:17px}
   .heat th.truck{font-family:var(--mono);font-size:11px;color:var(--mute);text-align:right;padding:0 10px 0 0;font-weight:400;white-space:nowrap;position:sticky;left:0;background:var(--panel)}
   .cell{width:17px;height:17px;border-radius:3px;background:#eef1f4;border:1px solid #e7eaee}
   .cell.l1{background:rgba(243,99,27,.24)}.cell.l2{background:rgba(243,99,27,.46)}.cell.l3{background:rgba(243,99,27,.70)}.cell.l4{background:rgba(243,99,27,.96);border-color:transparent}
   .heat td.cnt{font-family:var(--mono);font-size:11px;color:var(--mute);padding-left:10px;white-space:nowrap}
-  .legend{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;color:var(--mute)}
-  .legend .cell{width:13px;height:13px}
+  .legend{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;color:var(--mute)} .legend .cell{width:13px;height:13px}
   .foot{font-family:var(--mono);font-size:11px;color:var(--faint);padding:13px 18px;border-top:1px solid var(--line)}
   .pagefoot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:26px;padding-top:16px;border-top:1px solid var(--line);font-size:12px;color:var(--mute);flex-wrap:wrap}
   .pagefoot .sb{display:flex;align-items:center;gap:8px} .pagefoot .sb .sb-mark{width:20px;height:20px;border-radius:5px} .pagefoot .sb .sb-mark span{font-size:9px}
-  /* gate */
   .gate{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
   .gatebox{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:30px;max-width:360px;width:100%;text-align:center}
   .gatebox .sb-mark{margin:0 auto 14px;width:40px;height:40px}
-  .gatebox h2{font-weight:600;font-size:18px;margin-bottom:6px}
-  .gatebox p{font-size:13px;color:var(--mute);margin-bottom:18px}
+  .gatebox h2{font-weight:600;font-size:18px;margin-bottom:6px} .gatebox p{font-size:13px;color:var(--mute);margin-bottom:18px}
   .gatebox input{width:100%;font-family:var(--mono);font-size:14px;padding:11px 12px;border:1px solid var(--line);border-radius:9px;margin-bottom:12px}
   .gatebox button{width:100%;background:var(--accent);color:#fff;border:none;font-weight:600;font-size:14px;padding:11px;border-radius:9px;cursor:pointer}
-  .gatebox .err{color:#dc3b32;font-size:12px;margin-bottom:10px;min-height:16px}
+  .gatebox .err{color:var(--red);font-size:12px;margin-bottom:10px;min-height:16px}
   .loading{padding:50px;text-align:center;color:var(--mute);font-family:var(--mono);font-size:13px}
 </style>
 </head>
@@ -86,10 +91,9 @@
 <div class="gate" id="gate">
   <div class="gatebox">
     <div class="sb-mark"><span>SB</span></div>
-    <h2>Fleet Ledger</h2>
-    <p>Enter the access token to continue.</p>
+    <h2>Fleet Ledger</h2><p>Enter the access token to continue.</p>
     <div class="err" id="gateErr"></div>
-    <input id="tokenInput" type="password" placeholder="Access token" autocomplete="off">
+    <input id="tokenInput" type="password" placeholder="Access token" autocomplete="off" onkeydown="if(event.key==='Enter')saveToken()">
     <button onclick="saveToken()">Unlock</button>
   </div>
 </div>
@@ -101,25 +105,22 @@
       <div><h1>Fleet Ledger</h1><div class="by">by <b>SmileBots</b> · internal fleet &amp; finance</div></div>
     </div>
     <div class="period">
-      <input id="monthPick" type="month" style="background:var(--panel);border:1px solid var(--line);color:var(--ink);font-family:var(--mono);font-size:12px;padding:7px 10px;border-radius:7px">
+      <input id="monthPick" type="month">
       <button onclick="logout()">Lock</button>
     </div>
   </header>
-
   <nav>
-    <button class="tab on" data-v="util">Fleet Utilisation</button>
+    <button class="tab on" data-v="upi">UPI Limits</button>
+    <button class="tab" data-v="util">Fleet Utilisation</button>
     <button class="tab" data-v="fastag">FASTag</button>
-    <button class="tab" data-v="upi">UPI Limits</button>
     <button class="tab" data-v="reimb">Reimbursement</button>
     <button class="tab" data-v="fuel">Fuel</button>
   </nav>
-
-  <section class="view on" id="util"><div class="loading">Loading…</div></section>
+  <section class="view on" id="upi"><div class="loading">Loading…</div></section>
+  <section class="view" id="util"><div class="loading">Loading…</div></section>
   <section class="view" id="fastag"><div class="loading">Loading…</div></section>
-  <section class="view" id="upi"><div class="loading">Loading…</div></section>
-  <section class="view" id="reimb"></section>
-  <section class="view" id="fuel"></section>
-
+  <section class="view" id="reimb"><div class="loading">Loading…</div></section>
+  <section class="view" id="fuel"><div class="loading">Loading…</div></section>
   <div class="pagefoot">
     <div class="sb"><div class="sb-mark"><span>SB</span></div><span>Built &amp; run by <b style="color:var(--ink)">SmileBots</b></span></div>
     <span style="font-family:var(--mono);color:var(--faint)" id="stamp"></span>
@@ -130,144 +131,232 @@
 const TKEY='fleet_token';
 let TOKEN=localStorage.getItem(TKEY)||'';
 let MONTH=new Date().toISOString().slice(0,7);
+const ORDER=['0353','3826','1183','9421'];
+let charts={};
 
-function inr(n){if(n==null)return'—';const s=String(Math.round(n));if(s.length<=3)return'₹'+s;let r=s.slice(-3),x=s.slice(0,-3);while(x.length){r=x.slice(-2)+','+r;x=x.slice(0,-2);}return'₹'+r;}
+function inr(n){if(n==null)return'—';const neg=n<0;n=Math.abs(Math.round(n));let s=String(n);if(s.length>3){let r=s.slice(-3),x=s.slice(0,-3);while(x.length){r=x.slice(-2)+','+r;x=x.slice(0,-2);}s=r;}return(neg?'-':'')+'₹'+s;}
 function fdate(ts){const d=new Date(ts*1000),M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];let h=d.getHours(),m=String(d.getMinutes()).padStart(2,'0'),a=h>=12?'PM':'AM';h=h%12||12;return d.getDate()+' '+M[d.getMonth()]+', '+h+':'+m+' '+a;}
-function col(pct){return pct>=95?'var(--warn)':pct>=70?'var(--accent)':'var(--green)';}
+function reld(ts){const d=new Date(ts*1000),M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];let h=d.getHours(),m=String(d.getMinutes()).padStart(2,'0'),a=h>=12?'PM':'AM';h=h%12||12;return d.getDate()+' '+M[d.getMonth()]+', '+h+':'+m+' '+a;}
 
 async function api(path){
   const sep=path.includes('?')?'&':'?';
   const r=await fetch(path+sep+'token='+encodeURIComponent(TOKEN)+'&_='+Date.now());
-  if(r.status===403) throw new Error('unauthorized');
-  if(!r.ok) throw new Error('HTTP '+r.status);
+  if(r.status===403)throw new Error('unauthorized');
+  if(!r.ok)throw new Error('HTTP '+r.status);
   return r.json();
 }
-
 function saveToken(){
   const v=document.getElementById('tokenInput').value.trim();
   if(!v){document.getElementById('gateErr').textContent='Enter a token.';return;}
   TOKEN=v;
-  // verify against a guarded endpoint
   fetch('/fleetdata?token='+encodeURIComponent(v)).then(r=>{
     if(r.status===403){document.getElementById('gateErr').textContent='Wrong token.';return;}
-    localStorage.setItem(TKEY,v);
-    document.getElementById('gate').style.display='none';
-    document.getElementById('app').style.display='block';
-    boot();
+    localStorage.setItem(TKEY,v);unlock();
   }).catch(()=>{document.getElementById('gateErr').textContent='Could not reach server.';});
 }
+function unlock(){document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';boot();}
 function logout(){localStorage.removeItem(TKEY);location.reload();}
 
-// tabs
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('on'));
   t.classList.add('on');document.getElementById(t.dataset.v).classList.add('on');
 });
-
 function cardRow(cards){return '<div class="row cards">'+cards.map(c=>
   `<div class="card"><div class="k">${c.k}</div><div class="v ${c.cls||''}">${c.v}</div><div class="s">${c.s||''}</div></div>`).join('')+'</div>';}
+function mkChart(id,cfg){if(charts[id])charts[id].destroy();const ctx=document.getElementById(id);if(ctx)charts[id]=new Chart(ctx,cfg);}
 
-function dailyChart(perDay,fleet){
-  const max=Math.max(fleet,...perDay,1);
-  let c='<div class="ymax">peak '+Math.max(0,...perDay)+' active · fleet '+fleet+'</div><div class="cols">';
-  perDay.forEach((v,d)=>{c+=`<div class="col"><div class="tip">${v} trucks · ${d+1}</div><div class="bar" style="height:${Math.round(v/max*100)}%"></div></div>`;});
-  c+='</div><div class="xaxis">';
-  for(let d=1;d<=perDay.length;d++)c+='<div class="x">'+((d%5===0||d===1)?d:'')+'</div>';
-  return c+'</div>';
-}
-
-async function renderUtil(){
-  const el=document.getElementById('util');
-  try{
-    const d=await api('/fleetdata?month='+MONTH);
-    const s=d.summary;
-    let h=cardRow([
-      {k:'Avg trucks / day',v:s.avg_per_day,cls:'accent',s:'of '+d.fleet_size+' in fleet'},
-      {k:'Active truck-days',v:s.active_truck_days,s:'this month'},
-      {k:'Trucks not seen',v:s.idle_est,cls:'warn',s:'at no toll'},
-      {k:'Busiest day',v:s.busiest,s:'trucks'},
-    ]);
-    h+='<div class="section"><div class="hd"><h2>Unique active trucks · each day</h2><div class="note">of '+d.fleet_size+'</div></div><div class="chart">'+dailyChart(d.per_day_active,d.fleet_size)+'</div></div>';
-    // heatmap
-    if(d.trucks.length){
-      let hm='<thead><tr><th class="truck"></th>';
-      for(let i=1;i<=d.ndays;i++)hm+='<th class="day">'+i+'</th>';
-      hm+='<th class="day" style="min-width:34px">days</th></tr></thead><tbody>';
-      d.trucks.forEach(tk=>{
-        const rowc=d.matrix[tk];let active=0,cells='';
-        rowc.forEach((c,i)=>{let lvl=c===0?0:c<2?1:c<4?2:c<6?3:4;if(c)active++;
-          cells+='<td><div class="cell '+(lvl?'l'+lvl:'')+'" title="'+tk+' · day '+(i+1)+' · '+c+' crossing'+(c===1?'':'s')+'"></div></td>';});
-        hm+='<tr><th class="truck">'+tk+'</th>'+cells+'<td class="cnt">'+active+'</td></tr>';
-      });
-      hm+='</tbody>';
-      h+='<div class="section"><div class="hd"><h2>Who ran, which day</h2><div class="legend">fewer <span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span><span class="cell l3"></span><span class="cell l4"></span> more</div></div>'+
-         '<div class="hint">A cell lights when a truck <b>crossed a toll that day</b>; darker = more crossings. A truck on a <b>toll-free route is invisible</b> — read as “seen moving”, a floor on activity.</div>'+
-         '<div class="heat-scroll"><table class="heat">'+hm+'</table></div><div class="foot">'+d.trucks.length+' trucks seen × '+d.ndays+' days · '+MONTH+'</div></div>';
-    }else{
-      h+='<div class="section"><div class="empty"><div class="big">No toll crossings yet for '+MONTH+'</div>FASTag SMS build this up as they arrive.</div></div>';
-    }
-    el.innerHTML=h;
-  }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
-}
-
-async function renderFastag(){
-  const el=document.getElementById('fastag');
-  try{
-    const data=await api('/data'); const fd=await api('/fleetdata?month='+MONTH);
-    const bal=data.fastag?data.fastag.balance:null; const s=fd.summary;
-    let h=cardRow([
-      {k:'Pool balance',v:inr(bal),cls:bal!=null&&bal<=10500?'warn':'accent',s:bal!=null?'last updated':'no data yet'},
-      {k:'Toll spend · month',v:inr(s.toll_spend),s:s.crossings+' crossings'},
-      {k:'Active trucks · month',v:s.trucks_seen,s:'seen at tolls'},
-      {k:'Avg / day',v:s.avg_per_day,s:'trucks active'},
-    ]);
-    h+='<div class="section"><div class="hd"><h2>Unique active trucks · each day</h2><div class="note">trucks seen at a toll</div></div><div class="chart">'+dailyChart(fd.per_day_active,fd.fleet_size)+'</div></div>';
-    el.innerHTML=h;
-  }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
-}
-
+// ---------- UPI ----------
 async function renderUpi(){
   const el=document.getElementById('upi');
   try{
     const d=await api('/data');
-    const order=['0353','3826','1183','9421'];
     const byA={};d.accounts.forEach(a=>byA[a.account]=a);
-    let h=cardRow(order.map(a=>{const x=byA[a]||{available:100000,used:0,pct:0};
-      return {k:'••'+a,v:inr(x.available),cls:x.pct>=70?'accent':'green',s:'free of ₹1L'};}));
-    h+='<div class="section"><div class="hd"><h2>24-hour rolling limits</h2><div class="note">live — same data as the Telegram bot</div></div>'+
-       '<div class="hint">Each account resets on a rolling 24h window. The Telegram bot still sends the live alerts; this mirrors it.</div></div>';
+    // status mirror (Telegram layout)
+    let head='';
+    ORDER.forEach(a=>{const x=byA[a];const free=x?x.available:100000;const used=x?x.used:0;
+      head+=`<div class="it">••${a}: <b>${used>0?inr(free)+' free':'unused'}</b></div>`;});
+    const fb=d.fastag?d.fastag.balance:null;
+    if(fb!=null)head+=`<div class="it">FASTag: <b>${inr(fb)}</b></div>`;
+    let blocks='';
+    ORDER.forEach(a=>{const x=byA[a];if(!x||!x.transactions||!x.transactions.length)return;
+      const pct=x.pct;const emoji=pct>=95?'🔴':pct>=70?'🟡':'🟢';
+      let tx='';x.transactions.slice().sort((p,q)=>p.ts-q.ts).forEach(t=>{
+        tx+=`<div class="tx"><span>${inr(t.amount)}</span><span>→ ${reld(t.releases_at)}</span></div>`;});
+      blocks+=`<div class="acctblock"><div class="top"><span>••${a}  ${emoji} ${pct}%</span><span>${inr(x.available)} free</span></div>${tx}</div>`;
+    });
+    const stamp=d.last_txn_ts?('last txn '+reld(d.last_txn_ts)):'';
+    let h=`<div class="section"><div class="hd"><h2>Live status · 24h rolling</h2>`+
+      `<button class="btn pri" onclick="renderUpi()">↻ Refresh</button></div>`+
+      `<div class="statusbox"><div class="sb-head">${head}</div>${blocks||'<div style="color:var(--mute)">No usage in the last 24h.</div>'}`+
+      `<div style="color:var(--faint);margin-top:10px">${stamp} · updated ${fdate(d.server_ts)}</div></div></div>`;
     el.innerHTML=h;
-    document.getElementById('stamp').textContent='updated '+fdate(d.server_ts/1);
+    document.getElementById('stamp').textContent='updated '+fdate(d.server_ts);
+    // monthly spend chart
+    renderUpiSpend();
+  }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
+}
+async function renderUpiSpend(){
+  const el=document.getElementById('upi');
+  try{
+    const s=await api('/spend?month='+MONTH);
+    const totals=ORDER.map(a=>({k:'••'+a,v:inr(s.month_total_by_account[a]),s:'this month'}));
+    const sec=document.createElement('div');sec.className='section';
+    sec.innerHTML=`<div class="hd"><h2>Spend this month · ${MONTH}</h2><div class="note">tap a day for the account split</div></div>`+
+      `<div style="padding:16px 18px 0">${cardRow(totals).replace('row cards','row cards')}</div>`+
+      `<div class="chartwrap"><canvas id="upiSpendChart"></canvas></div>`+
+      `<div class="daydetail" id="upiDayDetail">Tap any day's bar to see which account it came from.</div>`;
+    el.appendChild(sec);
+    const labels=s.per_day_total.map((_,i)=>i+1);
+    mkChart('upiSpendChart',{
+      type:'bar',
+      data:{labels,datasets:[{label:'Total spend',data:s.per_day_total,backgroundColor:'#f3631b',borderRadius:4,maxBarThickness:22}]},
+      options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>'₹'+c.parsed.y.toLocaleString('en-IN')}}},
+        scales:{y:{ticks:{callback:v=>'₹'+(v/1000)+'k'},grid:{color:'#eef1f4'}},x:{grid:{display:false}}},
+        onClick:(evt,els)=>{if(!els.length)return;const d=els[0].index;
+          const parts=ORDER.map(a=>`••${a} ${inr(s.per_day_by_account[a][d])}`).filter((_,i)=>s.per_day_by_account[ORDER[i]][d]>0);
+          document.getElementById('upiDayDetail').innerHTML=`<b>${d+1} ${MONTH}</b> · total ${inr(s.per_day_total[d])}  —  `+(parts.join('  ·  ')||'no spend');
+        }}
+    });
+  }catch(e){/* spend optional */}
+}
+
+// ---------- Utilisation ----------
+async function renderUtil(){
+  const el=document.getElementById('util');
+  try{
+    const d=await api('/fleetdata?month='+MONTH);const s=d.summary;
+    let h=cardRow([
+      {k:'Avg trucks / active day',v:s.avg_per_active_day,cls:'accent',s:s.active_days+' days ran'},
+      {k:'Active truck-days',v:s.active_truck_days,s:'this month'},
+      {k:'Trucks not seen',v:s.idle_est,cls:'warn',s:'of '+d.fleet_size},
+      {k:'Busiest day',v:s.busiest,s:'trucks'},
+    ]);
+    h+=`<div class="section"><div class="hd"><h2>Unique active trucks · each day</h2><div class="note">of ${d.fleet_size}</div></div><div class="chartwrap"><canvas id="utilChart"></canvas></div></div>`;
+    if(d.trucks.length){
+      let hm='<thead><tr><th class="truck"></th>';
+      for(let i=1;i<=d.ndays;i++)hm+='<th class="day">'+i+'</th>';
+      hm+='<th class="day" style="min-width:34px">days</th></tr></thead><tbody>';
+      d.trucks.forEach(tk=>{const rowc=d.matrix[tk];let act=0,cells='';
+        rowc.forEach((c,i)=>{let lvl=c===0?0:c<2?1:c<4?2:c<6?3:4;if(c)act++;
+          cells+='<td><div class="cell '+(lvl?'l'+lvl:'')+'" title="'+tk+' · day '+(i+1)+' · '+c+' crossing'+(c===1?'':'s')+'"></div></td>';});
+        hm+='<tr><th class="truck">'+tk+'</th>'+cells+'<td class="cnt">'+act+'</td></tr>';});
+      hm+='</tbody>';
+      h+=`<div class="section"><div class="hd"><h2>Who ran, which day</h2><div class="legend">fewer <span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span><span class="cell l3"></span><span class="cell l4"></span> more</div></div>`+
+         `<div class="hint">A cell lights when a truck <b>crossed a toll that day</b>. A truck on a <b>toll-free route is invisible</b> — read as “seen moving”, a floor on activity.</div>`+
+         `<div class="heat-scroll"><table class="heat">${hm}</table></div><div class="foot">${d.trucks.length} trucks seen × ${d.ndays} days · ${MONTH}</div></div>`;
+    }else{h+='<div class="section"><div class="empty"><div class="big">No toll crossings yet for '+MONTH+'</div>Fills as FASTag SMS arrive.</div></div>';}
+    el.innerHTML=h;
+    const labels=d.per_day_active.map((_,i)=>i+1);
+    mkChart('utilChart',{type:'bar',data:{labels,datasets:[{data:d.per_day_active,backgroundColor:'#f3631b',borderRadius:4,maxBarThickness:22}]},
+      options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.y+' trucks'}}},
+        scales:{y:{beginAtZero:true,grid:{color:'#eef1f4'}},x:{grid:{display:false}}}}});
   }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
 }
 
-function renderReimb(){
-  document.getElementById('reimb').innerHTML=
-   '<div class="section"><div class="hd"><h2>Reimbursement reconciliation</h2></div>'+
-   '<div class="empty"><div class="big">Accruing</div>Debit history started recording on the server this month. '+
-   'Once a WhatsApp export is imported and a few weeks of debits are logged, matched business expenses on ••1183 / ••9421 appear here with a one-click sheet for your accountant.</div></div>';
+// ---------- FASTag ----------
+async function renderFastag(){
+  const el=document.getElementById('fastag');
+  try{
+    const data=await api('/data');const fd=await api('/fleetdata?month='+MONTH);
+    const bal=data.fastag?data.fastag.balance:null;const s=fd.summary;
+    let h=cardRow([
+      {k:'Pool balance',v:inr(bal),cls:bal!=null&&bal<=10500?'warn':'accent',s:bal!=null?'last updated':'no data'},
+      {k:'Toll spend · month',v:inr(s.toll_spend),s:s.crossings+' crossings'},
+      {k:'Active trucks',v:s.trucks_seen,s:'this month'},
+      {k:'Avg / active day',v:s.avg_per_active_day,s:'trucks'},
+    ]);
+    h+=`<div class="section"><div class="hd"><h2>Toll spend · each day</h2><div class="note">plan recharges from this</div></div><div class="chartwrap"><canvas id="fastagChart"></canvas></div><div class="daydetail" id="ftDay">Tap a day for its exact spend.</div></div>`;
+    el.innerHTML=h;
+    const labels=fd.per_day_spend.map((_,i)=>i+1);
+    mkChart('fastagChart',{type:'bar',data:{labels,datasets:[{data:fd.per_day_spend,backgroundColor:'#f3631b',borderRadius:4,maxBarThickness:22}]},
+      options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>'₹'+c.parsed.y.toLocaleString('en-IN')}}},
+        scales:{y:{beginAtZero:true,ticks:{callback:v=>'₹'+(v/1000)+'k'},grid:{color:'#eef1f4'}},x:{grid:{display:false}}},
+        onClick:(evt,els)=>{if(!els.length)return;const i=els[0].index;document.getElementById('ftDay').innerHTML=`<b>${i+1} ${MONTH}</b> · ${inr(fd.per_day_spend[i])}`;}}});
+  }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
 }
-function renderFuel(){
-  document.getElementById('fuel').innerHTML=
-   '<div class="section"><div class="hd"><h2>Fuel</h2></div>'+
-   '<div class="empty"><div class="big">First import pending</div>Drop the two WhatsApp chat exports into the Claude chat; the parsed fuellings (litres, rate, per-truck) load here.</div></div>';
+
+// ---------- Reimbursement ----------
+async function renderReimb(){
+  const el=document.getElementById('reimb');
+  try{
+    const d=await api('/reimbursement?month='+MONTH);
+    if(!d.has_expenses){
+      el.innerHTML='<div class="section"><div class="hd"><h2>Reimbursement</h2></div><div class="empty"><div class="big">No expenses imported yet</div>Import a parsed WhatsApp export (Fuel tab → Import) to reconcile against your ••1183 / ••9421 debits.</div></div>';return;
+    }
+    let h=cardRow([
+      {k:'Reimbursable',v:inr(d.totals.business),cls:'green',s:'matched'},
+      {k:'Personal',v:inr(d.totals.personal),s:'not claimed'},
+      {k:'Needs review',v:inr(d.totals.review),cls:'warn',s:'ambiguous'},
+      {k:'Month',v:MONTH,s:'reconciled'},
+    ]);
+    let rows='';d.rows.forEach(r=>{const cls=r.status==='business'?'biz':r.status==='review'?'rev':'per';
+      rows+=`<tr><td class="dt">${r.date.slice(8)}/${r.date.slice(5,7)}</td><td class="acct">${r.account}</td><td>${r.payee||'—'}</td><td class="num">${inr(r.amount)}</td><td><span class="pill ${cls}">${r.status}</span></td><td class="acct">${r.match||'—'}</td></tr>`;});
+    h+=`<div class="section"><div class="hd"><h2>Reconciliation · ${MONTH}</h2><button class="btn pri" onclick="exportReimb()">⇩ Reimbursable CSV</button></div>`+
+       `<div class="hint">Personal-account debits matched to chat expenses by <b>amount + date (±1 day)</b>. Ambiguous ones are held for review, not guessed.</div>`+
+       `<div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Acct</th><th>Payee</th><th class="num">Amount</th><th>Status</th><th>Matched</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    el.innerHTML=h;window._reimb=d;
+  }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
+}
+function exportReimb(){
+  const d=window._reimb;if(!d)return;
+  const rows=d.rows.filter(r=>r.status==='business');
+  let csv='Date,Account,Payee,Amount,Matched\n';
+  rows.forEach(r=>{csv+=`${r.date},${r.account},"${(r.payee||'').replace(/"/g,'""')}",${r.amount},"${r.match||''}"\n`;});
+  csv+=`,,,${d.totals.business},TOTAL\n`;
+  const b=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='reimbursement_'+MONTH+'.csv';a.click();
+}
+
+// ---------- Fuel + Import ----------
+async function renderFuel(){
+  const el=document.getElementById('fuel');
+  try{
+    const d=await api('/fuel?month='+MONTH);
+    let h=cardRow([
+      {k:'Diesel spend',v:inr(d.total_spend),cls:'accent',s:'through your UPI'},
+      {k:'Litres',v:(d.total_litres||0).toLocaleString('en-IN')+' L',s:'matched'},
+      {k:'Avg rate',v:d.avg_rate?('₹'+d.avg_rate):'—',s:'per litre'},
+      {k:'Fuellings',v:d.fuellings,s:'this month'},
+    ]);
+    h+=`<div class="section"><div class="hd"><h2>Import WhatsApp export</h2></div>`+
+       `<div class="hint">Drop the two chat exports into Claude; it returns a parsed <b>.json</b>. Pick that file here to load the fuellings — it de-dupes, so re-importing is safe.</div>`+
+       `<div style="padding:16px 18px"><input type="file" id="fuelFile" accept=".json" style="display:none" onchange="doImport(this)"><button class="btn pri" onclick="document.getElementById('fuelFile').click()">Choose parsed .json…</button> <span id="importMsg" style="font-family:var(--mono);font-size:12px;color:var(--mute);margin-left:10px"></span></div></div>`;
+    if(d.trucks&&d.trucks.length){
+      let rows='';d.trucks.forEach(t=>{rows+=`<tr><td class="acct">${t.truck}</td><td class="num">${t.fuellings}</td><td class="num">${t.litres.toLocaleString('en-IN')} L</td><td class="num">${inr(t.spend)}</td><td class="num">${t.avg_rate||'—'}</td></tr>`;});
+      h+=`<div class="section"><div class="hd"><h2>Per-truck fuel · ${MONTH}</h2></div><div style="overflow-x:auto"><table><thead><tr><th>Truck</th><th class="num">Fuellings</th><th class="num">Litres</th><th class="num">Spend</th><th class="num">Avg rate</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    }else{
+      h+='<div class="section"><div class="empty"><div class="big">No fuel data for '+MONTH+'</div>Import a parsed export above.</div></div>';
+    }
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
+}
+function doImport(input){
+  const f=input.files[0];if(!f)return;
+  const msg=document.getElementById('importMsg');msg.textContent='reading…';
+  const rd=new FileReader();
+  rd.onload=()=>{
+    let rows;try{const j=JSON.parse(rd.result);rows=Array.isArray(j)?j:(j.rows||[]);}catch(e){msg.textContent='not valid JSON';return;}
+    if(!rows.length){msg.textContent='no rows found';return;}
+    msg.textContent='uploading '+rows.length+' rows…';
+    fetch('/import?token='+encodeURIComponent(TOKEN),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows})})
+      .then(r=>r.json()).then(j=>{if(j.ok){msg.textContent='✓ added '+j.added+' (total '+j.total+')';renderFuel();renderReimb();}else{msg.textContent='error: '+(j.error||'failed');}})
+      .catch(e=>{msg.textContent='upload failed';});
+  };
+  rd.readAsText(f);
 }
 
 function boot(){
   document.getElementById('monthPick').value=MONTH;
-  document.getElementById('monthPick').onchange=e=>{MONTH=e.target.value;renderUtil();renderFastag();};
-  renderUtil();renderFastag();renderUpi();renderReimb();renderFuel();
+  document.getElementById('monthPick').onchange=e=>{MONTH=e.target.value;renderAll();};
+  renderAll();
 }
+function renderAll(){renderUpi();renderUtil();renderFastag();renderReimb();renderFuel();}
 
-// start
 if(TOKEN){
   fetch('/fleetdata?token='+encodeURIComponent(TOKEN)).then(r=>{
     if(r.status===403){localStorage.removeItem(TKEY);return;}
-    document.getElementById('gate').style.display='none';
-    document.getElementById('app').style.display='block';
-    boot();
-  }).catch(()=>{document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';boot();});
+    unlock();
+  }).catch(()=>{unlock();});
 }
 </script>
 </body>
