@@ -5,7 +5,7 @@ import time
 import logging
 import threading
 from datetime import datetime, timezone, timedelta
-from flask import Flask, request
+from flask import Flask, request, send_file
 from flask_cors import CORS
 import requests
 
@@ -555,9 +555,15 @@ def process_sms(text):
     return True
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 @app.route("/", methods=["GET"])
-def health():
-    return "UPI Tracker running.", 200
+def home():
+    """Serve the dashboard; fall back to a health string if the file is missing."""
+    index = os.path.join(BASE_DIR, "index.html")
+    if os.path.exists(index):
+        return send_file(index)
+    return "Fleet Ledger running.", 200
 
 @app.route("/ping", methods=["GET"])
 def ping():
