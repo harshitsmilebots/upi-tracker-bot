@@ -32,6 +32,17 @@ FASTAG_T2        = 6_000    # urgent warning
 FASTAG_LOG_DAYS  = 400      # keep ~13 months of toll history
 DASH_TOKEN       = os.environ.get("DASH_TOKEN", "").strip()  # guards read endpoints
 FLEET_SIZE       = int(os.environ.get("FLEET_SIZE", "45"))   # total trucks, for utilisation %
+# Personal vehicles that share the FASTag account — excluded from fleet analytics.
+# Match by registration suffix (editable via env, comma-separated).
+EXCLUDE_VEHICLE_SUFFIXES = tuple(
+    s.strip() for s in os.environ.get("EXCLUDE_VEHICLE_SUFFIXES", "1000,9936").split(",") if s.strip()
+)
+
+def is_fleet_vehicle(v):
+    """False for personal vehicles sharing the tag account (by reg suffix)."""
+    if not v:
+        return False
+    return not any(v.endswith(suf) for suf in EXCLUDE_VEHICLE_SUFFIXES)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -231,7 +242,7 @@ def fastag_line():
 
 def build_fleet_message():
     """Exact fleet metrics from the toll log (no trip inference)."""
-    log = load_fastag_log()
+    log = [e for e in load_fastag_log() if is_fleet_vehicle(e.get("vehicle"))]
     now = datetime.now(IST)
     today = now.strftime("%Y-%m-%d")
     month = now.strftime("%Y-%m")
@@ -656,7 +667,8 @@ def fleetdata():
     ndays = int((nxt - datetime(y, m, 1, tzinfo=IST)).days)
 
     with lock:
-        log = [e for e in load_fastag_log() if start <= e.get("ts", 0) < end and e.get("vehicle")]
+        log = [e for e in load_fastag_log()
+               if start <= e.get("ts", 0) < end and is_fleet_vehicle(e.get("vehicle"))]
 
     def day_of(ts):
         return datetime.fromtimestamp(ts, tz=IST).day  # 1..ndays
