@@ -126,6 +126,7 @@
         <span class="lbl" id="mLbl">—</span>
         <button id="mNext" onclick="stepMonth(1)" title="Next month">›</button>
       </div>
+      <input id="monthPick" type="month" title="Pick a month">
       <button class="lockbtn" onclick="logout()" title="Lock">🔒</button>
     </div>
   </header>
@@ -150,6 +151,8 @@
 <script>
 const TKEY='fleet_token';
 let TOKEN=localStorage.getItem(TKEY)||'';
+const _now=new Date();
+const THIS_MONTH=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0');
 const PARSE_PROMPT=`You are converting a WhatsApp chat export (.txt) from a diesel/fuel vendor into structured fuel records for a fleet finance tool. Output ONLY a JSON array — no prose, no code fences.
 
 Each element must be:
@@ -169,7 +172,7 @@ Rules:
 - id = first 16 hex chars of md5("vendor|date|amount|truck|litres").  De-duplicate on id.
 
 Then, on the Fleet Ledger dashboard → Fuel tab → Import, upload the JSON file.`;
-let MONTH=new Date().toISOString().slice(0,7);
+let MONTH=(new Date().getFullYear())+'-'+String(new Date().getMonth()+1).padStart(2,'0');
 const ORDER=['0353','3826','1183','9421'];
 let charts={};
 
@@ -393,17 +396,25 @@ function doImport(input){
   rd.readAsText(f);
 }
 
-const THIS_MONTH=new Date().toISOString().slice(0,7);
 function monthLabel(m){const[y,mo]=m.split('-');const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return M[+mo-1]+' '+y;}
 function stepMonth(delta){
-  const[y,mo]=MONTH.split('-').map(Number);const d=new Date(y,mo-1+delta,1);
-  const nm=d.toISOString().slice(0,7);
-  if(nm>THIS_MONTH)return; // don't go into the future
+  let [y,mo]=MONTH.split('-').map(Number);
+  mo+=delta;
+  while(mo<1){mo+=12;y--;}
+  while(mo>12){mo-=12;y++;}
+  const nm=y+'-'+String(mo).padStart(2,'0');
+  if(nm>THIS_MONTH)return;           // no future months
   MONTH=nm;updateMonthUI();renderAll();
+}
+function setMonth(m){
+  if(!m||m>THIS_MONTH)return;
+  MONTH=m;updateMonthUI();renderAll();
 }
 function updateMonthUI(){
   document.getElementById('mLbl').textContent=monthLabel(MONTH);
   document.getElementById('mNext').disabled=(MONTH>=THIS_MONTH);
+  const mp=document.getElementById('monthPick');
+  if(mp){mp.value=MONTH;mp.max=THIS_MONTH;}
 }
 // Chart.js theme-aware defaults
 function themeCharts(){
@@ -415,6 +426,8 @@ function themeCharts(){
 function boot(){
   themeCharts();
   MONTH=THIS_MONTH;updateMonthUI();
+  const mp=document.getElementById('monthPick');
+  if(mp)mp.onchange=e=>setMonth(e.target.value);
   renderAll();
 }
 function renderAll(){renderUpi();renderUtil();renderFastag();renderReimb();renderFuel();}
