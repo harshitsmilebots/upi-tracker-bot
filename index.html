@@ -423,12 +423,25 @@ function themeCharts(){
   Chart.defaults.color=dark?'#8a919c':'#737b87';
   Chart.defaults.borderColor=dark?'#262b33':'#eef1f4';
 }
+let _lastRefresh=0;
+function softRefresh(){
+  // avoid stampede: skip if refreshed within 3s
+  if(Date.now()-_lastRefresh<3000)return;
+  _lastRefresh=Date.now();
+  renderAll();
+}
 function boot(){
   themeCharts();
   MONTH=THIS_MONTH;updateMonthUI();
   const mp=document.getElementById('monthPick');
   if(mp)mp.onchange=e=>setMonth(e.target.value);
-  renderAll();
+  renderAll();_lastRefresh=Date.now();
+  // Fresh data whenever the app returns to the foreground (fixes stale-on-reopen)
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)softRefresh();});
+  window.addEventListener('focus',softRefresh);
+  window.addEventListener('pageshow',e=>{if(e.persisted)softRefresh();});
+  // Light periodic refresh of the live tab while open
+  setInterval(()=>{if(!document.hidden)renderUpi();},60000);
 }
 function renderAll(){renderUpi();renderUtil();renderFastag();renderReimb();renderFuel();}
 
