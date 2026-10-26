@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Fleet Ledger">
+<meta name="theme-color" content="#f3631b">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <title>Fleet Ledger — SmileBots</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
@@ -127,6 +131,7 @@
         <button id="mNext" onclick="stepMonth(1)" title="Next month">›</button>
       </div>
       <input id="monthPick" type="month" title="Pick a month">
+      <button class="lockbtn" id="bellBtn" onclick="enablePush()" title="Enable notifications">🔔</button>
       <button class="lockbtn" onclick="logout()" title="Lock">🔒</button>
     </div>
   </header>
@@ -445,11 +450,45 @@ function boot(){
 }
 function renderAll(){renderUpi();renderUtil();renderFastag();renderReimb();renderFuel();}
 
+// ---------- Web push ----------
+if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(()=>{});}
+function urlB64ToUint8(b64){
+  const pad='='.repeat((4-b64.length%4)%4);
+  const s=(b64+pad).replace(/-/g,'+').replace(/_/g,'/');
+  const raw=atob(s);return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
+}
+function bellState(){
+  const b=document.getElementById('bellBtn');if(!b)return;
+  if(!('Notification'in window)){b.style.display='none';return;}
+  if(Notification.permission==='granted'){b.textContent='🔔';b.title='Notifications on (tap to send a test)';b.style.color='var(--accent)';}
+  else if(Notification.permission==='denied'){b.textContent='🔕';b.title='Notifications blocked in settings';}
+  else{b.textContent='🔔';b.title='Enable notifications';}
+}
+async function enablePush(){
+  try{
+    if(!('serviceWorker'in navigator)||!('PushManager'in window)){alert('Push isn’t supported here. On iPhone: add to Home Screen first, then open from there (needs iOS 16.4+).');return;}
+    const reg=await navigator.serviceWorker.ready;
+    if(Notification.permission==='granted'){
+      // already on — fire a test
+      await fetch('/push/test?token='+encodeURIComponent(TOKEN),{method:'POST'});
+      return;
+    }
+    const perm=await Notification.requestPermission();
+    if(perm!=='granted'){bellState();alert('Notifications not granted. On iPhone you must open the app from the Home Screen icon and allow when prompted.');return;}
+    const {key}=await (await fetch('/push/key')).json();
+    if(!key){alert('Server push not configured yet (VAPID keys missing).');return;}
+    const sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlB64ToUint8(key)});
+    await fetch('/push/subscribe?token='+encodeURIComponent(TOKEN),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sub)});
+    bellState();
+    await fetch('/push/test?token='+encodeURIComponent(TOKEN),{method:'POST'}); // confirm with a test push
+  }catch(e){alert('Could not enable notifications: '+e.message);}
+}
+
 if(TOKEN){
   fetch('/fleetdata?token='+encodeURIComponent(TOKEN)).then(r=>{
     if(r.status===403){localStorage.removeItem(TKEY);return;}
-    unlock();
-  }).catch(()=>{unlock();});
+    unlock();bellState();
+  }).catch(()=>{unlock();bellState();});
 }
 </script>
 </body>

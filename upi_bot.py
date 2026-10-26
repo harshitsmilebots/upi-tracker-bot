@@ -2,12 +2,21 @@ import os
 import json
 import re
 import time
+import base64
+import tempfile
 import logging
 import threading
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, send_file
 from flask_cors import CORS
+import struct
 import requests
+from urllib.parse import urlparse
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BOT_TOKEN        = os.environ["BOT_TOKEN"].strip()
@@ -33,6 +42,19 @@ FASTAG_T2        = 6_000    # urgent warning
 FASTAG_LOG_DAYS  = 400      # keep ~13 months of toll history
 DASH_TOKEN       = os.environ.get("DASH_TOKEN", "").strip()  # guards read endpoints
 FLEET_SIZE       = int(os.environ.get("FLEET_SIZE", "45"))   # total trucks, for utilisation %
+
+# ── Web push (VAPID) ─────────────────────────────────────────────────────────
+VAPID_PUBLIC     = os.environ.get("VAPID_PUBLIC", "").strip()
+VAPID_SUB        = os.environ.get("VAPID_SUB", "mailto:harshit@smilebots.com").strip()
+PUSH_SUBS_FILE   = os.path.join(DATA_DIR, "push_subs.json") if DATA_DIR else "push_subs.json"
+_VAPID_KEY = None
+_vpb64 = os.environ.get("VAPID_PRIVATE_B64", "").strip()
+if _vpb64:
+    try:
+        _pem = base64.b64decode(_vpb64)
+        _VAPID_KEY = serialization.load_pem_private_key(_pem, password=None)
+    except Exception as _e:
+        _VAPID_KEY = None
 # Personal vehicles that share the FASTag account — excluded from fleet analytics.
 # Match by registration suffix (editable via env, comma-separated).
 EXCLUDE_VEHICLE_SUFFIXES = tuple(
@@ -562,6 +584,92 @@ def parse_sync_message(text):
 # ── Telegram API ──────────────────────────────────────────────────────────────
 BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+# ── Web push helpers ─────────────────────────────────────────────────────────
+def load_subs():
+    if os.path.exists(PUSH_SUBS_FILE):
+        try:
+            with open(PUSH_SUBS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_subs(subs):
+    with open(PUSH_SUBS_FILE, "w") as f:
+        json.dump(subs, f)
+
+def _plain(text):
+    """Strip Telegram markdown for the push body."""
+    t = re.sub(r'[*_`]', '', text or '')
+    return t.strip()
+
+def _b64u_dec(s):
+    s = s.replace('-', '+').replace('_', '/'); s += '=' * (-len(s) % 4)
+    return base64.b64decode(s)
+
+def _b64u_enc(b):
+    return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
+
+def _vapid_header(endpoint):
+    u = urlparse(endpoint)
+    aud = f"{u.scheme}://{u.netloc}"
+    header = _b64u_enc(json.dumps({"typ": "JWT", "alg": "ES256"}, separators=(',', ':')).encode())
+    claims = _b64u_enc(json.dumps({"aud": aud, "exp": int(time.time()) + 12 * 3600, "sub": VAPID_SUB}, separators=(',', ':')).encode())
+    signing_input = f"{header}.{claims}".encode()
+    der = _VAPID_KEY.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+    r, s = decode_dss_signature(der)
+    sig = r.to_bytes(32, 'big') + s.to_bytes(32, 'big')
+    jwt = f"{header}.{claims}." + _b64u_enc(sig)
+    return f"vapid t={jwt}, k={VAPID_PUBLIC}"
+
+def _encrypt_payload(payload, p256dh_b64, auth_b64):
+    """RFC 8291 aes128gcm web-push payload encryption."""
+    ua_pub_bytes = _b64u_dec(p256dh_b64)             # 65 bytes
+    auth         = _b64u_dec(auth_b64)               # 16 bytes
+    ua_pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), ua_pub_bytes)
+    as_priv = ec.generate_private_key(ec.SECP256R1())
+    as_pub_bytes = as_priv.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    shared = as_priv.exchange(ec.ECDH(), ua_pub)
+    key_info = b"WebPush: info\x00" + ua_pub_bytes + as_pub_bytes
+    ikm   = HKDF(algorithm=hashes.SHA256(), length=32, salt=auth, info=key_info).derive(shared)
+    salt  = os.urandom(16)
+    cek   = HKDF(algorithm=hashes.SHA256(), length=16, salt=salt, info=b"Content-Encoding: aes128gcm\x00").derive(ikm)
+    nonce = HKDF(algorithm=hashes.SHA256(), length=12, salt=salt, info=b"Content-Encoding: nonce\x00").derive(ikm)
+    ct = AESGCM(cek).encrypt(nonce, payload + b"\x02", None)   # 0x02 = last-record delimiter
+    header = salt + struct.pack("!L", 4096) + bytes([len(as_pub_bytes)]) + as_pub_bytes
+    return header + ct
+
+def send_push(text):
+    if not (VAPID_PUBLIC and _VAPID_KEY):
+        return
+    subs = load_subs()
+    if not subs:
+        return
+    data = text.encode('utf-8')
+    dead = []
+    for s in subs:
+        try:
+            ep   = s["endpoint"]
+            keys = s.get("keys", {})
+            enc  = _encrypt_payload(data, keys["p256dh"], keys["auth"])
+            headers = {
+                "Authorization":    _vapid_header(ep),
+                "Content-Encoding": "aes128gcm",
+                "Content-Type":     "application/octet-stream",
+                "TTL":              "600",
+            }
+            r = requests.post(ep, data=enc, headers=headers, timeout=10)
+            if r.status_code in (404, 410):
+                dead.append(s)
+            elif r.status_code >= 400:
+                log.warning(f"push {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            log.warning(f"push error: {e}")
+    if dead:
+        save_subs([s for s in subs if s not in dead])
+        log.info(f"pruned {len(dead)} dead push subs")
+
 def send(text, parse_mode="Markdown"):
     r = requests.post(f"{BASE}/sendMessage", json={
         "chat_id":    CHAT_ID,
@@ -569,6 +677,11 @@ def send(text, parse_mode="Markdown"):
         "parse_mode": parse_mode
     })
     log.info(f"send() status={r.status_code} ok={r.json().get('ok')}")
+    # mirror the same message to the dashboard PWA via web push
+    try:
+        threading.Thread(target=send_push, args=(_plain(text),), daemon=True).start()
+    except Exception:
+        pass
 
 def set_webhook():
     url = f"{WEBHOOK_URL}/webhook"
@@ -610,6 +723,47 @@ def home():
     if os.path.exists(index):
         return send_file(index)
     return "Fleet Ledger running.", 200
+
+@app.route("/sw.js", methods=["GET"])
+def sw_js():
+    return send_file(os.path.join(BASE_DIR, "sw.js"), mimetype="application/javascript")
+
+@app.route("/manifest.json", methods=["GET"])
+def manifest():
+    return send_file(os.path.join(BASE_DIR, "manifest.json"), mimetype="application/manifest+json")
+
+@app.route("/icon-192.png", methods=["GET"])
+def icon192():
+    return send_file(os.path.join(BASE_DIR, "icon-192.png"), mimetype="image/png")
+
+@app.route("/icon-512.png", methods=["GET"])
+def icon512():
+    return send_file(os.path.join(BASE_DIR, "icon-512.png"), mimetype="image/png")
+
+@app.route("/push/key", methods=["GET"])
+def push_key():
+    return {"key": VAPID_PUBLIC, "enabled": bool(VAPID_PUBLIC and _VAPID_KEY)}, 200
+
+@app.route("/push/subscribe", methods=["POST"])
+def push_subscribe():
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    sub = request.get_json(silent=True)
+    if not sub or "endpoint" not in sub:
+        return {"ok": False, "error": "bad subscription"}, 400
+    with lock:
+        subs = load_subs()
+        if not any(s.get("endpoint") == sub["endpoint"] for s in subs):
+            subs.append(sub)
+            save_subs(subs)
+    return {"ok": True, "count": len(load_subs())}, 200
+
+@app.route("/push/test", methods=["POST"])
+def push_test():
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    send_push("🔔 Fleet Ledger\nPush is working — this is a test.")
+    return {"ok": True}, 200
 
 @app.route("/ping", methods=["GET"])
 def ping():
