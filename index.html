@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Fleet Ledger">
 <meta name="theme-color" content="#f3631b">
@@ -31,7 +31,7 @@
   }
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
-  .wrap{max-width:1180px;margin:0 auto;padding:0 20px calc(84px + env(safe-area-inset-bottom,0px))}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 20px calc(128px + env(safe-area-inset-bottom,0px))}
   header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 0 18px;flex-wrap:wrap}
   .brand{display:flex;align-items:center;gap:13px}
   .sb-mark{width:30px;height:30px;border-radius:8px;background:var(--accent);display:flex;align-items:center;justify-content:center}
@@ -40,17 +40,26 @@
   .brand .by{font-size:12px;color:var(--mute)} .brand .by b{color:var(--ink);font-weight:600}
   .period{display:flex;align-items:center;gap:8px}
   .period input,.period button{background:var(--panel);border:1px solid var(--line);color:var(--ink);font-family:var(--mono);font-size:12px;padding:7px 10px;border-radius:7px;cursor:pointer;box-shadow:var(--shadow)}
-  /* bottom navigation (app-style) */
-  nav#bnav{position:fixed;left:0;right:0;bottom:0;z-index:40;display:flex;justify-content:center;
-    background:var(--panel);border-top:1px solid var(--line);
-    box-shadow:0 -1px 4px rgba(20,24,30,.06);
+  /* bottom bar: month strip + nav, fixed, with iOS safe-area */
+  #bottombar{position:fixed;left:0;right:0;bottom:0;z-index:40;background:var(--panel);
+    border-top:1px solid var(--line);box-shadow:0 -1px 6px rgba(20,24,30,.08);
     padding-bottom:env(safe-area-inset-bottom,0px)}
-  #bnav .tab{flex:1;max-width:130px;display:flex;flex-direction:column;align-items:center;gap:3px;
-    background:none;border:none;border-radius:0;padding:9px 2px 8px;cursor:pointer;color:var(--mute);
-    font-size:11px;font-weight:500;transition:color .15s}
-  #bnav .tab .ic{font-size:19px;line-height:1}
-  #bnav .tab.on{color:var(--accent)}
-  #bnav .tab:active{opacity:.6}
+  #monthstrip{display:flex;align-items:center;justify-content:center;gap:4px;padding:8px 12px;border-bottom:1px solid var(--line)}
+  #monthstrip .mbtn{background:none;border:none;color:var(--mute);font-family:var(--mono);font-size:18px;line-height:1;padding:4px 12px;cursor:pointer;border-radius:6px}
+  #monthstrip .mbtn:hover{color:var(--accent)} #monthstrip .mbtn:disabled{color:var(--faint);cursor:default}
+  #monthstrip input{background:var(--panel2);border:1px solid var(--line);color:var(--ink);font-family:var(--mono);font-size:13px;padding:6px 12px;border-radius:7px;min-width:148px;text-align:center}
+  nav#bnav{display:flex;justify-content:center}
+  #bnav .tab{flex:1;max-width:118px;display:flex;flex-direction:column;align-items:center;gap:3px;background:none;border:none;border-radius:0;padding:8px 2px 7px;cursor:pointer;color:var(--mute);font-size:10.5px;font-weight:500;transition:color .15s;box-shadow:none}
+  #bnav .tab svg{width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+  #bnav .tab.on{color:var(--accent)} #bnav .tab:active{opacity:.6}
+  /* kebab menu */
+  .menuwrap{position:relative}
+  .kebab{background:none;border:none;color:var(--mute);cursor:pointer;padding:6px;border-radius:8px}
+  .kebab:hover{color:var(--ink)} .kebab svg circle{fill:currentColor;stroke:none}
+  .menu{position:absolute;right:0;top:40px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:6px;min-width:184px;display:none;z-index:60}
+  .menu.open{display:block}
+  .menu button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--ink);font-size:13.5px;padding:10px 12px;border-radius:7px;cursor:pointer}
+  .menu button:hover{background:var(--panel2)}
   .monthnav{display:flex;align-items:center;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
   .monthnav button{background:var(--panel);border:none;color:var(--ink);font-family:var(--mono);font-size:14px;padding:7px 11px;cursor:pointer}
   .monthnav button:hover{color:var(--accent)} .monthnav button:disabled{color:var(--faint);cursor:default}
@@ -132,24 +141,16 @@
       <div class="sb-mark"><span>SB</span></div>
       <div><h1>Fleet Ledger</h1><div class="by">by <b>SmileBots</b> · internal fleet &amp; finance</div></div>
     </div>
-    <div class="period">
-      <div class="monthnav">
-        <button id="mPrev" onclick="stepMonth(-1)" title="Previous month">‹</button>
-        <span class="lbl" id="mLbl">—</span>
-        <button id="mNext" onclick="stepMonth(1)" title="Next month">›</button>
+    <div class="menuwrap">
+      <button class="kebab" onclick="toggleMenu(event)" aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>
+      </button>
+      <div class="menu" id="menu">
+        <button id="notifItem" onclick="enablePush();closeMenu()">Enable notifications</button>
+        <button onclick="logout()">Lock</button>
       </div>
-      <input id="monthPick" type="month" title="Pick a month">
-      <button class="lockbtn" id="bellBtn" onclick="enablePush()" title="Enable notifications">🔔</button>
-      <button class="lockbtn" onclick="logout()" title="Lock">🔒</button>
     </div>
   </header>
-  <nav id="bnav">
-    <button class="tab on" data-v="upi"><span class="ic">🏠</span><span class="lb">Home</span></button>
-    <button class="tab" data-v="util"><span class="ic">🚚</span><span class="lb">Trucks</span></button>
-    <button class="tab" data-v="fastag"><span class="ic">🛣️</span><span class="lb">FASTag</span></button>
-    <button class="tab" data-v="reimb"><span class="ic">🧾</span><span class="lb">Claims</span></button>
-    <button class="tab" data-v="fuel"><span class="ic">⛽</span><span class="lb">Fuel</span></button>
-  </nav>
   <section class="view on" id="upi"><div class="loading">Loading…</div></section>
   <section class="view" id="util"><div class="loading">Loading…</div></section>
   <section class="view" id="fastag"><div class="loading">Loading…</div></section>
@@ -159,6 +160,26 @@
     <div class="sb"><div class="sb-mark"><span>SB</span></div><span>Built &amp; run by <b style="color:var(--ink)">SmileBots</b></span></div>
     <span style="font-family:var(--mono);color:var(--faint)" id="stamp"></span>
   </div>
+</div>
+
+<div id="bottombar" style="display:none">
+  <div id="monthstrip">
+    <button class="mbtn" onclick="stepMonth(-1)" aria-label="Previous month">‹</button>
+    <input id="monthPick" type="month" title="Pick a month">
+    <button class="mbtn" id="mNext" onclick="stepMonth(1)" aria-label="Next month">›</button>
+  </div>
+  <nav id="bnav">
+    <button class="tab on" data-v="upi" aria-label="Status">
+      <svg viewBox="0 0 24 24"><path d="M3 10.8 12 3.5l9 7.3"/><path d="M5.2 9.3V20.5h13.6V9.3"/></svg><span class="lb">Status</span></button>
+    <button class="tab" data-v="util" aria-label="Trucks">
+      <svg viewBox="0 0 24 24"><rect x="3" y="6.5" width="11" height="9.5" rx="1"/><path d="M14 9.5h3.6L21 13v3h-7z"/><circle cx="7" cy="18.2" r="1.5"/><circle cx="17.5" cy="18.2" r="1.5"/></svg><span class="lb">Trucks</span></button>
+    <button class="tab" data-v="fastag" aria-label="FASTag">
+      <svg viewBox="0 0 24 24"><path d="M7 20.5 9.5 4"/><path d="M17 20.5 14.5 4"/><path d="M12 6v2.2M12 11v2.2M12 16v2.2"/></svg><span class="lb">FASTag</span></button>
+    <button class="tab" data-v="reimb" aria-label="Claims">
+      <svg viewBox="0 0 24 24"><path d="M6 3.5h12v17l-2-1.3-2 1.3-2-1.3-2 1.3-2-1.3z"/><path d="M9 8.5h6M9 12h6"/></svg><span class="lb">Claims</span></button>
+    <button class="tab" data-v="fuel" aria-label="Fuel">
+      <svg viewBox="0 0 24 24"><path d="M5 20.5V5.5A2 2 0 0 1 7 3.5h4a2 2 0 0 1 2 2v15"/><path d="M4 20.5h10"/><path d="M8 8.5h5"/><path d="M13 7.5l3.2 3.2V17a1.8 1.8 0 0 0 3.6 0V9.6l-2.8-2.8"/></svg><span class="lb">Fuel</span></button>
+  </nav>
 </div>
 
 <script>
@@ -209,7 +230,7 @@ function saveToken(){
     localStorage.setItem(TKEY,v);unlock();
   }).catch(()=>{document.getElementById('gateErr').textContent='Could not reach server.';});
 }
-function unlock(){document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';boot();}
+function unlock(){document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';document.getElementById('bottombar').style.display='block';boot();}
 function logout(){localStorage.removeItem(TKEY);location.reload();}
 
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
@@ -424,11 +445,13 @@ function setMonth(m){
   MONTH=m;updateMonthUI();renderAll();
 }
 function updateMonthUI(){
-  document.getElementById('mLbl').textContent=monthLabel(MONTH);
-  document.getElementById('mNext').disabled=(MONTH>=THIS_MONTH);
-  const mp=document.getElementById('monthPick');
-  if(mp){mp.value=MONTH;mp.max=THIS_MONTH;}
+  const lbl=document.getElementById('mLbl'); if(lbl)lbl.textContent=monthLabel(MONTH);
+  const nx=document.getElementById('mNext'); if(nx)nx.disabled=(MONTH>=THIS_MONTH);
+  const mp=document.getElementById('monthPick'); if(mp){mp.value=MONTH;mp.max=THIS_MONTH;}
 }
+function toggleMenu(e){e.stopPropagation();const m=document.getElementById('menu');if(m)m.classList.toggle('open');}
+function closeMenu(){const m=document.getElementById('menu');if(m)m.classList.remove('open');}
+document.addEventListener('click',e=>{const w=document.querySelector('.menuwrap');if(w&&!w.contains(e.target))closeMenu();});
 // Chart.js theme-aware defaults
 function themeCharts(){
   if(!window.Chart)return;
@@ -466,11 +489,11 @@ function urlB64ToUint8(b64){
   const raw=atob(s);return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
 }
 function bellState(){
-  const b=document.getElementById('bellBtn');if(!b)return;
-  if(!('Notification'in window)){b.style.display='none';return;}
-  if(Notification.permission==='granted'){b.textContent='🔔';b.title='Notifications on (tap to send a test)';b.style.color='var(--accent)';}
-  else if(Notification.permission==='denied'){b.textContent='🔕';b.title='Notifications blocked in settings';}
-  else{b.textContent='🔔';b.title='Enable notifications';}
+  const b=document.getElementById('notifItem');if(!b)return;
+  if(!('Notification'in window)){b.textContent='Notifications (unsupported)';return;}
+  if(Notification.permission==='granted')b.textContent='Send a test notification';
+  else if(Notification.permission==='denied')b.textContent='Notifications blocked';
+  else b.textContent='Enable notifications';
 }
 async function enablePush(){
   try{
