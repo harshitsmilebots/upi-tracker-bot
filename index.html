@@ -74,7 +74,7 @@
   .card .k{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute)}
   .card .v{font-family:var(--mono);font-weight:600;font-size:23px;margin-top:8px;letter-spacing:-.02em}
   .card .s{font-size:12px;color:var(--mute);margin-top:4px}
-  .v.accent{color:var(--accent)}.v.green{color:var(--green)}.v.warn{color:var(--warn)}
+  .v.accent{color:var(--accent)}.v.green{color:var(--green)}.v.warn{color:var(--warn)}.v.red{color:var(--red)}
   .section{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-top:16px;overflow:hidden;box-shadow:var(--shadow)}
   .section>.hd{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 18px;border-bottom:1px solid var(--line);flex-wrap:wrap}
   .section>.hd h2{font-weight:600;font-size:15.5px} .section>.hd .note{font-size:12px;color:var(--mute)}
@@ -121,6 +121,23 @@
   .gatebox button{width:100%;background:var(--accent);color:#fff;border:none;font-weight:600;font-size:14px;padding:11px;border-radius:9px;cursor:pointer}
   .gatebox .err{color:var(--red);font-size:12px;margin-bottom:10px;min-height:16px}
   .loading{padding:50px;text-align:center;color:var(--mute);font-family:var(--mono);font-size:13px}
+  /* reimbursement row editor (bottom sheet on phone, centered on desktop) */
+  .modal{position:fixed;inset:0;background:rgba(10,12,16,.5);display:none;align-items:flex-end;justify-content:center;z-index:70}
+  .modal.open{display:flex}
+  .modalbox{background:var(--panel);border:1px solid var(--line);border-radius:16px 16px 0 0;box-shadow:var(--shadow);padding:20px 18px calc(22px + env(safe-area-inset-bottom,0px));width:100%;max-width:520px}
+  @media(min-width:560px){.modal{align-items:center}.modalbox{border-radius:16px}}
+  .modalbox h3{font-size:16px;font-weight:600;margin-bottom:3px}
+  .modalbox .sub{font-size:12.5px;color:var(--mute);margin-bottom:16px;font-family:var(--mono)}
+  .fld{margin-bottom:15px}
+  .fld label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--mute);margin-bottom:7px}
+  .seg{display:flex;gap:7px}
+  .seg button{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--ink);font-size:13px;padding:9px;border-radius:8px;cursor:pointer;text-transform:capitalize}
+  .seg button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .fld select,.fld input{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);font-size:14px;padding:10px 11px;border-radius:9px;font-family:var(--sans)}
+  .modalbtns{display:flex;gap:10px;margin-top:4px}
+  .modalbtns button{flex:1;padding:11px;border-radius:9px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--line)}
+  .modalbtns .save{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .modalbtns .cancel{background:var(--panel);color:var(--ink)}
 </style>
 </head>
 <body>
@@ -182,11 +199,22 @@
   </nav>
 </div>
 
+<div class="modal" id="editModal" onclick="if(event.target===this)closeEdit()">
+  <div class="modalbox" id="editBox"></div>
+</div>
+
 <script>
 const TKEY='fleet_token';
 let TOKEN=localStorage.getItem(TKEY)||'';
-const _now=new Date();
-const THIS_MONTH=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0');
+// All dates render in IST regardless of the viewer's device timezone.
+const IST_TZ='Asia/Kolkata';
+function istParts(ts){
+  const dtf=new Intl.DateTimeFormat('en-GB',{timeZone:IST_TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+  const p={};dtf.formatToParts(new Date(ts*1000)).forEach(x=>{if(x.type!=='literal')p[x.type]=x.value;});
+  return {y:+p.year,mo:+p.month,d:+p.day,h:(+p.hour)%24,min:+p.min||+p.minute};
+}
+function istMonth(ts){const p=istParts(ts);return p.y+'-'+String(p.mo).padStart(2,'0');}
+const THIS_MONTH=istMonth(Date.now()/1000);
 const PARSE_PROMPT=`You are converting a WhatsApp chat export (.txt) from a diesel/fuel vendor into structured fuel records for a fleet finance tool. Output ONLY a JSON array — no prose, no code fences.
 
 Each element must be:
@@ -206,13 +234,16 @@ Rules:
 - id = first 16 hex chars of md5("vendor|date|amount|truck|litres").  De-duplicate on id.
 
 Then, on the Fleet Ledger dashboard → Fuel tab → Import, upload the JSON file.`;
-let MONTH=(new Date().getFullYear())+'-'+String(new Date().getMonth()+1).padStart(2,'0');
+let MONTH=THIS_MONTH;
 const ORDER=['0353','3826','1183','9421'];
 let charts={};
 
 function inr(n){if(n==null)return'—';const neg=n<0;n=Math.abs(Math.round(n));let s=String(n);if(s.length>3){let r=s.slice(-3),x=s.slice(0,-3);while(x.length){r=x.slice(-2)+','+r;x=x.slice(0,-2);}s=r;}return(neg?'-':'')+'₹'+s;}
-function fdate(ts){const d=new Date(ts*1000),M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];let h=d.getHours(),m=String(d.getMinutes()).padStart(2,'0'),a=h>=12?'PM':'AM';h=h%12||12;return d.getDate()+' '+M[d.getMonth()]+', '+h+':'+m+' '+a;}
-function reld(ts){const d=new Date(ts*1000),M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];let h=d.getHours(),m=String(d.getMinutes()).padStart(2,'0'),a=h>=12?'PM':'AM';h=h%12||12;return d.getDate()+' '+M[d.getMonth()]+', '+h+':'+m+' '+a;}
+const _M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function fdate(ts){const p=istParts(ts);let h=p.h%12||12,m=String(p.min).padStart(2,'0'),a=p.h>=12?'PM':'AM';return p.d+' '+_M[p.mo-1]+', '+h+':'+m+' '+a;}
+function reld(ts){return fdate(ts);}
+function fmtDays(n){return (Math.round(n*10)/10)+'d';}
+function dPlus(days){const p=istParts(Date.now()/1000+days*86400);return p.d+' '+_M[p.mo-1];}
 
 async function api(path){
   const sep=path.includes('?')?'&':'?';
@@ -334,21 +365,46 @@ async function renderUtil(){
 async function renderFastag(){
   const el=document.getElementById('fastag');
   try{
-    const data=await api('/data');const fd=await api('/fleetdata?month='+MONTH);
+    const data=await api('/data');const fd=await api('/fleetdata?month='+MONTH);const hist=await api('/fastaghistory?days=30');
     const bal=data.fastag?data.fastag.balance:null;const s=fd.summary;
+    const rw=(data.fastag&&data.fastag.runway)||hist.runway;
+    const danger=(data.fastag&&data.fastag.danger)||5000,warn=(data.fastag&&data.fastag.warn)||10500;
+    const balCls=bal==null?'accent':(bal<=danger?'red':bal<=warn?'warn':'accent');
+    const mp=rw?rw.morning_projected:null;
     let h=cardRow([
-      {k:'Pool balance',v:inr(bal),cls:bal!=null&&bal<=10500?'warn':'accent',s:bal!=null?'last updated':'no data'},
-      {k:'Toll spend · month',v:inr(s.toll_spend),s:s.crossings+' crossings'},
-      {k:'Active trucks',v:s.trucks_seen,s:'this month'},
-      {k:'Avg / active day',v:s.avg_per_active_day,s:'trucks'},
+      {k:'Pool balance',v:inr(bal),cls:balCls,s:bal!=null?(bal<=danger?'danger — recharge':bal<=warn?'low':'healthy'):'no data'},
+      {k:'Daily burn',v:rw&&rw.daily_burn?inr(rw.daily_burn):'—',cls:'accent',s:'7-day avg'},
+      {k:'Days to danger',v:rw&&rw.days_to_danger!=null?fmtDays(rw.days_to_danger):'—',cls:(rw&&rw.days_to_danger!=null&&rw.days_to_danger<2)?'red':'warn',s:'to '+inr(danger)},
+      {k:'By 8am tomorrow',v:mp!=null?inr(mp):'—',cls:(mp!=null&&mp<danger)?'red':'green',s:'projected'},
     ]);
-    h+=`<div class="section"><div class="hd"><h2>Toll spend · each day</h2><div class="note">plan recharges from this</div></div><div class="chartwrap"><canvas id="fastagChart"></canvas></div><div class="daydetail" id="ftDay">Tap a day for its exact spend.</div></div>`;
+    if(rw&&rw.daily_burn>0){
+      const hw=rw.days_to_warn!=null?('~'+fmtDays(rw.days_to_warn)+' ('+dPlus(rw.days_to_warn)+')'):'—';
+      const hd=rw.days_to_danger!=null?('~'+fmtDays(rw.days_to_danger)+' ('+dPlus(rw.days_to_danger)+')'):'—';
+      let risk='';
+      if(mp!=null){const safe=mp>=danger;
+        risk=`<div style="margin-top:9px;font-weight:600;color:${safe?'var(--green)':'var(--red)'}">`+
+          (safe?`✓ ~${inr(mp)} projected by 8am — safe overnight.`
+               :`⚠ ~${inr(mp)} projected by 8am — below ${inr(danger)} before a recharge can reflect. Recharge tonight.`)+`</div>`;}
+      h+=`<div class="section"><div class="hint" style="border-bottom:none;line-height:1.7">`+
+         `At <b>${inr(rw.daily_burn)}/day</b>, the wallet reaches <b>${inr(warn)}</b> in ${hw}, and the <b>${inr(danger)}</b> danger line in ${hd}.`+
+         risk+
+         `<div style="margin-top:8px;color:var(--faint)">Burn counts every vehicle on the tag (incl. personal). A recharge takes up to ~3h to reflect, so the overnight-to-noon window is the blind spot.</div></div></div>`;
+    }
+    h+=`<div class="section"><div class="hd"><h2>Toll spend · each day</h2><div class="note">${MONTH}</div></div><div class="chartwrap"><canvas id="fastagChart"></canvas></div><div class="daydetail" id="ftDay">Tap a day for its exact spend.</div></div>`;
+    h+=`<div class="section"><div class="hd"><h2>Toll vs fuel · last 30 days</h2><div class="note">daily spend</div></div><div class="chartwrap"><canvas id="ftCorr"></canvas></div>`+
+       `<div class="hint" style="border-top:1px solid var(--line);border-bottom:none">Heavy-running days usually push <b>both</b> bars up together — a quick gut-check that fuel and toll track the same kilometres.</div></div>`;
     el.innerHTML=h;
     const labels=fd.per_day_spend.map((_,i)=>i+1);
     mkChart('fastagChart',{type:'bar',data:{labels,datasets:[{data:fd.per_day_spend,backgroundColor:'#f3631b',borderRadius:4,maxBarThickness:22}]},
       options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>'₹'+c.parsed.y.toLocaleString('en-IN')}}},
         scales:{y:{beginAtZero:true,ticks:{callback:v=>'₹'+(v/1000)+'k'},grid:{color:Chart.defaults.borderColor}},x:{grid:{display:false}}},
         onClick:(evt,els)=>{if(!els.length)return;const i=els[0].index;document.getElementById('ftDay').innerHTML=`<b>${i+1} ${MONTH}</b> · ${inr(fd.per_day_spend[i])}`;}}});
+    const clabels=hist.labels.map(d=>d.slice(8)+'/'+d.slice(5,7));
+    mkChart('ftCorr',{type:'bar',data:{labels:clabels,datasets:[
+        {label:'Toll',data:hist.toll,backgroundColor:'#f3631b',borderRadius:3,maxBarThickness:13},
+        {label:'Fuel',data:hist.fuel,backgroundColor:'#15a35b',borderRadius:3,maxBarThickness:13}]},
+      options:{responsive:true,plugins:{legend:{display:true,position:'top',labels:{boxWidth:12,font:{size:11}}},tooltip:{callbacks:{label:c=>c.dataset.label+': ₹'+c.parsed.y.toLocaleString('en-IN')}}},
+        scales:{y:{beginAtZero:true,ticks:{callback:v=>'₹'+(v/1000)+'k'},grid:{color:Chart.defaults.borderColor}},x:{grid:{display:false},ticks:{maxRotation:0,autoSkip:true,maxTicksLimit:10}}}}});
   }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
 }
 
@@ -360,26 +416,70 @@ async function renderReimb(){
     if(!d.has_expenses){
       el.innerHTML='<div class="section"><div class="hd"><h2>Reimbursement</h2></div><div class="empty"><div class="big">No expenses imported yet</div>Import a parsed WhatsApp export (Fuel tab → Import) to reconcile against your ••1183 / ••9421 debits.</div></div>';return;
     }
+    window._reimb=d;
     let h=cardRow([
-      {k:'Reimbursable',v:inr(d.totals.business),cls:'green',s:'matched'},
+      {k:'Reimbursable',v:inr(d.totals.business),cls:'green',s:'business'},
       {k:'Personal',v:inr(d.totals.personal),s:'not claimed'},
       {k:'Needs review',v:inr(d.totals.review),cls:'warn',s:'ambiguous'},
       {k:'Month',v:MONTH,s:'reconciled'},
     ]);
     let rows='';d.rows.forEach(r=>{const cls=r.status==='business'?'biz':r.status==='review'?'rev':'per';
-      rows+=`<tr><td class="dt">${r.date.slice(8)}/${r.date.slice(5,7)}</td><td class="acct">${r.account}</td><td>${r.payee||'—'}</td><td class="num">${inr(r.amount)}</td><td><span class="pill ${cls}">${r.status}</span></td><td class="acct">${r.match||'—'}</td></tr>`;});
+      const key=r.key.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      rows+=`<tr onclick="editRow('${key}')" style="cursor:pointer">`+
+        `<td class="dt">${r.date.slice(8)}/${r.date.slice(5,7)}</td>`+
+        `<td class="acct">${r.account}</td>`+
+        `<td>${r.payee||'—'}${r.edited?' <span style="color:var(--accent)" title="edited">•</span>':''}</td>`+
+        `<td class="num">${inr(r.amount)}</td>`+
+        `<td><span class="pill ${cls}">${r.status}</span></td>`+
+        `<td>${r.category||'<span style="color:var(--faint)">—</span>'}</td>`+
+        `<td class="acct">${r.truck||'—'}</td></tr>`;});
     h+=`<div class="section"><div class="hd"><h2>Reconciliation · ${MONTH}</h2><button class="btn pri" onclick="exportReimb()">⇩ Reimbursable CSV</button></div>`+
-       `<div class="hint">Personal-account debits matched to chat expenses by <b>amount + date (±1 day)</b>. Ambiguous ones are held for review, not guessed.</div>`+
-       `<div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Acct</th><th>Payee</th><th class="num">Amount</th><th>Status</th><th>Matched</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
-    el.innerHTML=h;window._reimb=d;
+       `<div class="hint">Auto-matched by <b>amount + date (±1 day)</b>; ambiguous ones held for review, not guessed. <b>Tap any row</b> to set its type, category or truck — edits stick through re-imports and the CSV follows.</div>`+
+       `<div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Acct</th><th>Payee</th><th class="num">Amount</th><th>Type</th><th>Category</th><th>Truck</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    el.innerHTML=h;
   }catch(e){el.innerHTML='<div class="empty"><div class="big">Couldn’t load</div>'+e.message+'</div>';}
+}
+let _editKey=null;
+function editRow(key){
+  const d=window._reimb;if(!d)return;
+  const r=d.rows.find(x=>x.key===key);if(!r)return;
+  _editKey=key;
+  const cats=['(none)'].concat(d.categories||[]);
+  const catOpts=cats.map(c=>{const val=c==='(none)'?'':c;return `<option value="${val}"${(r.category||'')===val?' selected':''}>${c}</option>`;}).join('');
+  const trucks=(d.known_trucks||[]).map(t=>`<option value="${t.last4}">${t.reg}</option>`).join('');
+  document.getElementById('editBox').innerHTML=
+    `<h3>${inr(r.amount)} · ••${r.account}</h3><div class="sub">${r.date} · ${r.payee||'—'}</div>`+
+    `<div class="fld"><label>Classification</label><div class="seg" id="segCls">`+
+      ['business','review','personal'].map(c=>`<button data-v="${c}" class="${r.status===c?'on':''}" onclick="segPick(this)">${c}</button>`).join('')+`</div></div>`+
+    `<div class="fld"><label>Category</label><select id="edCat">${catOpts}</select></div>`+
+    `<div class="fld"><label>Truck (last 4)</label><input id="edTruck" list="trucklist" placeholder="e.g. 6292" value="${r.truck||''}"><datalist id="trucklist">${trucks}</datalist></div>`+
+    `<div class="modalbtns">`+
+      (r.edited?`<button class="cancel" onclick="saveOverride(true)">Reset</button>`:``)+
+      `<button class="cancel" onclick="closeEdit()">Cancel</button>`+
+      `<button class="save" onclick="saveOverride(false)">Save</button></div>`;
+  document.getElementById('editModal').classList.add('open');
+}
+function segPick(b){b.parentNode.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');}
+function closeEdit(){document.getElementById('editModal').classList.remove('open');_editKey=null;}
+async function saveOverride(reset){
+  if(!_editKey)return;
+  let body={key:_editKey};
+  if(reset){body.classification='';body.category='';body.truck='';body.note='';}
+  else{const seg=document.querySelector('#segCls button.on');
+    body.classification=seg?seg.dataset.v:'';
+    body.category=document.getElementById('edCat').value;
+    body.truck=document.getElementById('edTruck').value.trim();}
+  try{
+    await fetch('/reimbursement/override?token='+encodeURIComponent(TOKEN),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    closeEdit();renderReimb();
+  }catch(e){alert('Could not save: '+e.message);}
 }
 function exportReimb(){
   const d=window._reimb;if(!d)return;
   const rows=d.rows.filter(r=>r.status==='business');
-  let csv='Date,Account,Payee,Amount,Matched\n';
-  rows.forEach(r=>{csv+=`${r.date},${r.account},"${(r.payee||'').replace(/"/g,'""')}",${r.amount},"${r.match||''}"\n`;});
-  csv+=`,,,${d.totals.business},TOTAL\n`;
+  let csv='Date,Account,Payee,Amount,Category,Truck,Matched\n';
+  rows.forEach(r=>{csv+=`${r.date},${r.account},"${(r.payee||'').replace(/"/g,'""')}",${r.amount},"${r.category||''}","${r.truck||''}","${r.match||''}"\n`;});
+  csv+=`,,,${d.totals.business},,,TOTAL\n`;
   const b=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='reimbursement_'+MONTH+'.csv';a.click();
 }
 

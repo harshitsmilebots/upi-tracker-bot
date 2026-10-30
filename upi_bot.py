@@ -32,16 +32,27 @@ FASTAG_FILE      = os.path.join(DATA_DIR, "fastag.json") if DATA_DIR else "fasta
 FASTAG_LOG_FILE  = os.path.join(DATA_DIR, "fastag_log.json") if DATA_DIR else "fastag_log.json"
 DEBITS_LOG_FILE  = os.path.join(DATA_DIR, "debits_log.json") if DATA_DIR else "debits_log.json"
 EXPENSES_FILE    = os.path.join(DATA_DIR, "expenses_log.json") if DATA_DIR else "expenses_log.json"
+OVERRIDES_FILE   = os.path.join(DATA_DIR, "reimb_overrides.json") if DATA_DIR else "reimb_overrides.json"
 LIMIT            = 100_000
 WINDOW           = 24 * 3600
 TRACKED_ACCOUNTS = {"0353", "3826", "1183", "9421"}
 
-# FASTag low-balance alert thresholds (two tiers)
-FASTAG_T1        = 10_500   # first warning
-FASTAG_T2        = 6_000    # urgent warning
+# FASTag alert thresholds
+FASTAG_T1        = 10_500   # early warning — "recharge soon"
+FASTAG_T2        = 5_000    # danger line — trucks risk being stopped at toll
+FASTAG_DANGER    = FASTAG_T2
 FASTAG_LOG_DAYS  = 400      # keep ~13 months of toll history
+# The blind spot: Harshit checks ~8am; a recharge takes up to ~3h to reflect
+# (≈noon). So from late evening to noon the balance only falls — overnight is
+# where a silent drop below the danger line stops trucks.
+MORNING_HOUR     = 8        # hour he checks balance
+RECHARGE_REFLECT = 12       # hour a nightly recharge has reflected by
 DASH_TOKEN       = os.environ.get("DASH_TOKEN", "").strip()  # guards read endpoints
 FLEET_SIZE       = int(os.environ.get("FLEET_SIZE", "45"))   # total trucks, for utilisation %
+
+# Reimbursement expense categories (served to the dashboard dropdown; edit freely)
+REIMB_CATEGORIES = ["Fuel", "Toll", "Repair", "Parts", "Tyres",
+                    "Driver advance", "Insurance", "RTO/Permit", "Misc", "Personal"]
 
 # ── Web push (VAPID) ─────────────────────────────────────────────────────────
 VAPID_PUBLIC     = os.environ.get("VAPID_PUBLIC", "").strip()
@@ -161,6 +172,36 @@ def merge_expenses(new_rows):
 
 def _ist_day(ts):
     return datetime.fromtimestamp(ts, tz=IST).strftime("%Y-%m-%d")
+
+# ── Reimbursement overrides (manual edits that survive re-import/recompute) ────
+# Keyed per debit by bank ref (or account|amount|ts when ref is absent). Each
+# value may carry: classification (business|personal|review), category, truck, note.
+def debit_key(e):
+    if e.get("ref"):
+        return "ref:" + str(e["ref"])
+    return f"{e.get('account')}|{e.get('amount')}|{int(e.get('ts', 0))}"
+
+def load_overrides():
+    if os.path.exists(OVERRIDES_FILE):
+        try:
+            with open(OVERRIDES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_overrides(ov):
+    with open(OVERRIDES_FILE, "w") as f:
+        json.dump(ov, f)
+
+def known_trucks():
+    """Distinct fleet trucks seen in toll + fuel data, for the truck picker."""
+    regs = {e.get("vehicle") for e in load_fastag_log()
+            if e.get("vehicle") and is_fleet_vehicle(e.get("vehicle"))}
+    out = []
+    for r in sorted(regs):
+        out.append({"reg": r, "last4": r[-4:]})
+    return out
 
 # ── FASTag persistence ────────────────────────────────────────────────────────
 def load_fastag():
@@ -332,9 +373,91 @@ def build_fleet_message():
     ft = fastag_line()
     if ft:
         lines.append(f"\n{ft}")
+        rw = fastag_runway()
+        if rw and rw["daily_burn"] > 0:
+            lines.append(f"Burn ~{fmt_inr(rw['daily_burn'])}/day")
+            if rw["days_to_danger"] is not None:
+                dd = datetime.now(IST) + timedelta(days=rw["days_to_danger"])
+                lines.append(f"Hits {fmt_inr(FASTAG_DANGER)} in ~{rw['days_to_danger']:g}d ({dd.strftime('%-d %b')})")
     if not log:
         lines.append("\n_No toll data yet — it builds up as FASTag SMS arrive._")
     return "\n".join(lines)
+
+# ── FASTag runway & morning-risk projection ──────────────────────────────────
+# The whole FASTag wallet is drained by every vehicle on the account (fleet AND
+# the personal ones), so burn-rate math counts ALL toll crossings — unlike the
+# fleet-utilisation views, which exclude personal vehicles.
+def _hourly_burn(window_days=14):
+    """Average toll spend per clock-hour (0..23) over the last `window_days`.
+    Returns a list of 24 floats (₹/hour averaged across the window)."""
+    cutoff = time.time() - window_days * 86400
+    hour_total = [0.0] * 24
+    for e in load_fastag_log():
+        if e.get("ts", 0) < cutoff or not e.get("toll"):
+            continue
+        h = datetime.fromtimestamp(e["ts"], tz=IST).hour
+        hour_total[h] += e["toll"]
+    return [x / window_days for x in hour_total]
+
+def _project_to_hour(target_hour, window_days=14):
+    """Project the FASTag balance forward to the next `target_hour` IST, using
+    the historical spend in that clock window. Returns a dict or None."""
+    st = load_fastag()
+    bal = st.get("balance")
+    if bal is None:
+        return None
+    hour_avg = _hourly_burn(window_days)
+    daily = sum(hour_avg)
+    now = datetime.now(IST)
+    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    # Sum the average burn across the clock-hours between now and target.
+    expected, cur = 0.0, now
+    while cur < target:
+        nxt = min(target, cur.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+        expected += hour_avg[cur.hour] * ((nxt - cur).total_seconds() / 3600.0)
+        cur = nxt
+    return {"balance": bal, "projected": bal - expected, "expected": expected,
+            "daily": daily, "target_ts": target.timestamp()}
+
+def fastag_runway():
+    """Days until the wallet reaches the warning / danger lines at current burn."""
+    proj = _project_to_hour(MORNING_HOUR)
+    if not proj:
+        return None
+    bal, daily = proj["balance"], proj["daily"]
+    def days_to(thr):
+        if bal <= thr:
+            return 0.0
+        return round((bal - thr) / daily, 1) if daily > 0 else None
+    return {"balance": bal, "daily_burn": round(daily),
+            "days_to_warn": days_to(FASTAG_T1), "days_to_danger": days_to(FASTAG_DANGER),
+            "warn": FASTAG_T1, "danger": FASTAG_DANGER,
+            "morning_projected": round(proj["projected"])}
+
+def fastag_night_watch():
+    """Once each evening, project tomorrow 8am. If the wallet is likely to fall
+    below the danger line before a recharge could reflect, push a heads-up so
+    Harshit can top up tonight. Deduped per day via fastag state (survives restarts)."""
+    while True:
+        try:
+            now = datetime.now(IST)
+            # Fire in the 9pm–11pm window; recharge reflects by noon, so night is the last safe moment.
+            if 21 <= now.hour <= 23:
+                st = load_fastag()
+                today = now.strftime("%Y-%m-%d")
+                if st.get("balance") is not None and st.get("risk_alert_day") != today:
+                    proj = _project_to_hour(MORNING_HOUR)
+                    if proj and proj["projected"] < FASTAG_DANGER:
+                        send(f"🌙 *Recharge FASTag tonight*\n"
+                             f"Now {fmt_inr(proj['balance'])} · projected ~{fmt_inr(max(0, proj['projected']))} by {MORNING_HOUR}am.\n"
+                             f"That's below the {fmt_inr(FASTAG_DANGER)} danger line, and a recharge won't reflect till ~noon — top up before bed to keep trucks moving.")
+                        st["risk_alert_day"] = today
+                        save_fastag(st)
+        except Exception as e:
+            log.warning(f"night watch: {e}")
+        time.sleep(1800)  # every 30 min
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 def parse_sms(text):
@@ -833,8 +956,48 @@ def data():
     return jsonify({
         "accounts":    accounts,
         "last_txn_ts": last_ts,
-        "fastag":      {"balance": fastag.get("balance"), "ts": fastag.get("ts")},
+        "fastag":      {"balance": fastag.get("balance"), "ts": fastag.get("ts"),
+                        "runway": fastag_runway(),
+                        "warn": FASTAG_T1, "danger": FASTAG_DANGER},
         "server_ts":   time.time()
+    })
+
+@app.route("/fastaghistory", methods=["GET"])
+def fastag_history():
+    """Daily toll spend with daily fuel spend overlaid, last ?days=N (default 30).
+    Token-guarded. Lets the fuel↔toll correlation be eyeballed."""
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    from flask import jsonify
+    try:
+        days = max(7, min(120, int(request.args.get("days", 30))))
+    except ValueError:
+        days = 30
+    now = datetime.now(IST)
+    labels, idx = [], {}
+    for i in range(days - 1, -1, -1):
+        d = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        idx[d] = len(labels); labels.append(d)
+    toll = [0.0] * days
+    for e in load_fastag_log():
+        if not e.get("toll"):
+            continue
+        d = _ist_day(e["ts"])
+        if d in idx:
+            toll[idx[d]] += e["toll"]
+    fuel = [0.0] * days
+    for r in load_expenses():
+        if r.get("kind") != "fuel":
+            continue
+        d = str(r.get("date", ""))
+        if d in idx:
+            fuel[idx[d]] += (r.get("amount") or 0)
+    return jsonify({
+        "labels": labels,
+        "toll": [round(x) for x in toll],
+        "fuel": [round(x) for x in fuel],
+        "runway": fastag_runway(),
+        "server_ts": time.time(),
     })
 
 @app.route("/fleetdata", methods=["GET"])
@@ -1013,6 +1176,7 @@ def reimbursement():
         debits   = [e for e in load_debits_log()
                     if e.get("account") in personal and str(_ist_day(e["ts"])).startswith(month)]
         expenses = list(load_expenses())
+        overrides = load_overrides()
 
     # index expenses by amount for quick lookup; track consumption (one-to-one)
     exp_by_amt = {}
@@ -1026,29 +1190,76 @@ def reimbursement():
         amt = round(e.get("amount", 0))
         cands = [i for i in exp_by_amt.get(amt, [])
                  if i not in consumed and abs(expenses[i].get("ts", 0) - e["ts"]) <= 1.5 * DAY]
+        auto_truck = None
+        auto_cat = None
         if len(cands) == 1:
             consumed.add(cands[0])
             x = expenses[cands[0]]
             status = "business"
             match = x.get("truck") or x.get("vendor") or "business expense"
+            auto_truck = x.get("truck")
+            if x.get("kind") == "fuel":
+                auto_cat = "Fuel"
         elif len(cands) == 0:
             status = "personal"; match = None
         else:
             status = "review"; match = f"{len(cands)} possible matches"
+
+        key = debit_key(e)
+        ov = overrides.get(key, {})
+        # Manual edits win over the auto-reconciliation.
+        status   = ov.get("classification", status)
+        category = ov.get("category", auto_cat)
+        truck    = ov.get("truck", auto_truck)
         results.append({
+            "key": key,
             "ts": e["ts"], "date": _ist_day(e["ts"]), "account": e["account"],
             "amount": e["amount"], "payee": e.get("payee"),
             "status": status, "match": match,
+            "category": category, "truck": truck,
+            "note": ov.get("note"),
+            "edited": bool(ov),
         })
 
     tot = {"business": 0, "personal": 0, "review": 0}
     for r in results:
-        tot[r["status"]] += r["amount"]
+        tot[r["status"]] = tot.get(r["status"], 0) + r["amount"]
     return jsonify({
         "month": month, "rows": results, "totals": tot,
         "has_expenses": len(expenses) > 0,
+        "categories": REIMB_CATEGORIES,
+        "known_trucks": known_trucks(),
         "server_ts": time.time(),
     })
+
+@app.route("/reimbursement/override", methods=["POST"])
+def reimbursement_override():
+    """Set or clear manual edits on one debit row. Token-guarded.
+    Body: {"key": <row key>, "classification"?, "category"?, "truck"?, "note"?}
+    An empty-string value clears that field; clearing all removes the override."""
+    if not _authed():
+        return {"ok": False, "error": "unauthorized"}, 403
+    body = request.get_json(silent=True) or {}
+    key = body.get("key")
+    if not key:
+        return {"ok": False, "error": "no key"}, 400
+    allowed = ("classification", "category", "truck", "note")
+    with lock:
+        ov = load_overrides()
+        cur = dict(ov.get(key, {}))
+        for k in allowed:
+            if k in body:
+                v = body[k]
+                if v in ("", None):
+                    cur.pop(k, None)
+                else:
+                    cur[k] = v
+        if cur:
+            ov[key] = cur
+        else:
+            ov.pop(key, None)
+        save_overrides(ov)
+    return {"ok": True, "key": key, "override": ov.get(key, {})}, 200
 
 @app.route("/sms", methods=["POST"])
 def sms_endpoint():
@@ -1125,8 +1336,10 @@ def webhook():
                 "/fleet — today & month: trucks running, toll spend\n\n"
                 "/sync — restore from a pasted status message\n\n"
                 "Accounts: 353, 3826, 1183, 9421\n"
-                "FASTag balance shows in every status; you're alerted only "
-                "when it drops below ₹10,500, then again below ₹6,000.\n\n"
+                "FASTag balance shows in every status; you're alerted when it "
+                "drops below ₹10,500, then again below ₹5,000. At night you also "
+                "get a recharge-tonight heads-up if it's likely to fall below "
+                "₹5,000 by morning (before a recharge could reflect).\n\n"
                 "You can also paste a raw bank or FASTag SMS to log it manually."
             )
             send(help_text)
@@ -1257,6 +1470,7 @@ def self_ping():
 log.info(f"Starting on port {PORT}")
 set_webhook()
 threading.Thread(target=self_ping, daemon=True).start()
+threading.Thread(target=fastag_night_watch, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
